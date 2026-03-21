@@ -1,0 +1,17 @@
+pre-commit:
+  parallel: true
+  commands:
+    gofmt:
+      glob: "*.go"
+      run: gofmt -l {staged_files} | grep . && echo "run gofmt" && exit 1 || exit 0
+    go-vet:
+      run: go vet ./...
+
+pre-push:
+  commands:
+    golangci-lint:
+      run: golangci-lint run
+    tests:
+      run: go test ./...
+    build:
+      run: go build -o /dev/null ./...
