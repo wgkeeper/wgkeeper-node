@@ -433,7 +433,7 @@ func (s *WireGuardService) EnsurePeer(peerID string, expiresAt *time.Time, addre
 	if err != nil {
 		return PeerInfo{}, err
 	}
-	if err := s.store.PersistPut(rec); err != nil {
+	if err := s.store.PersistPutIfPresent(rec); err != nil {
 		return PeerInfo{}, fmt.Errorf(errSavePeerStoreFmt, err)
 	}
 	return info, nil

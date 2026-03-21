@@ -623,3 +623,46 @@ func mustTime(ts string) time.Time {
 	}
 	return t
 }
+
+// TestPersistPutIfPresentSkipsWhenDeleted verifies that PersistPutIfPresent
+// does not write to DB when the peer has been removed from the in-memory store
+// (simulates a concurrent DeletePeer racing with EnsurePeer's persist step).
+func TestPersistPutIfPresentSkipsWhenDeleted(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, testPeersFile)
+	key, _ := wgtypes.GenerateKey()
+	psk, _ := wgtypes.GenerateKey()
+	rec := PeerRecord{
+		PeerID:       "race-peer",
+		PublicKey:    key,
+		PresharedKey: psk,
+		AllowedIPs:   mustParseCIDRs(t, testAllowedIP),
+		CreatedAt:    time.Now().UTC(),
+	}
+
+	store := NewPeerStore()
+	if err := store.OpenFile(path); err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+
+	// Peer is added to store (simulates doEnsurePeer completing) then
+	// immediately deleted (simulates concurrent DeletePeer winning the race).
+	store.Set(rec)
+	store.Delete(rec.PeerID)
+
+	// PersistPutIfPresent must be a no-op: peer is gone from the store.
+	if err := store.PersistPutIfPresent(rec); err != nil {
+		t.Fatalf("PersistPutIfPresent: %v", err)
+	}
+	store.Close()
+
+	// Reopen and verify the record was NOT written to DB.
+	store2 := NewPeerStore()
+	if err := store2.OpenFile(path); err != nil {
+		t.Fatalf("OpenFile (reload): %v", err)
+	}
+	defer store2.Close()
+	if _, ok := store2.Get("race-peer"); ok {
+		t.Fatal("peer should not be in DB after PersistPutIfPresent skipped write")
+	}
+}

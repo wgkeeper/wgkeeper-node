@@ -275,6 +275,30 @@ func (s *PeerStore) PersistPut(record PeerRecord) error {
 	if s.db == nil {
 		return nil
 	}
+	return s.persistPutLocked(record)
+}
+
+// PersistPutIfPresent writes a peer record to the open DB only when the peer
+// is still in the in-memory store with the same public key. This prevents a
+// stale write when a concurrent DeletePeer removes the peer between
+// doEnsurePeer (which releases s.mu) and the caller's persist step.
+// No-op if no DB is open.
+func (s *PeerStore) PersistPutIfPresent(record PeerRecord) error {
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+	if s.db == nil {
+		return nil
+	}
+	s.mu.RLock()
+	current, ok := s.peers[record.PeerID]
+	s.mu.RUnlock()
+	if !ok || current.PublicKey != record.PublicKey {
+		return nil
+	}
+	return s.persistPutLocked(record)
+}
+
+func (s *PeerStore) persistPutLocked(record PeerRecord) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b, err := tx.CreateBucketIfNotExists(peersBucket)
 		if err != nil {
