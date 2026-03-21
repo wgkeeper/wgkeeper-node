@@ -176,7 +176,7 @@ Suitable for local use and simple setups. Uses `docker-compose.local.yml`.
    docker compose -f docker-compose.local.yml up -d
    ```
 
-The compose file uses `ghcr.io/wgkeeper/node:0.0.8` (or `edge` for the latest `main` build), with `NET_ADMIN` + `SYS_MODULE` capabilities, volumes for `config.yaml` and `./wireguard`, and ports `51820/udp` and `51821`. IPv4/IPv6 forwarding sysctls and an IPv6-capable network are preconfigured; adjust as needed for your environment.
+The compose file uses `ghcr.io/wgkeeper/node:1.0.0` (or `edge` for the latest `main` build), with `NET_ADMIN` + `SYS_MODULE` capabilities, volumes for `config.yaml` and `./wireguard`, and ports `51820/udp` and `51821`. IPv4/IPv6 forwarding sysctls and an IPv6-capable network are preconfigured; adjust as needed for your environment.
 
 ### Docker Compose — production with Caddy
 
@@ -266,7 +266,7 @@ curl http://localhost:51821/stats -H "X-API-Key: <your-api-key>"
 
 ```json
 {
-  "service": { "name": "wgkeeper-node", "version": "0.0.8" },
+  "service": { "name": "wgkeeper-node", "version": "1.0.0" },
   "wireguard": {
     "interface": "wg0",
     "listenPort": 51820,
