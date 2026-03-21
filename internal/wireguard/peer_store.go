@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	bolt "go.etcd.io/bbolt"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
@@ -32,6 +33,8 @@ type peerRecordStored struct {
 	CreatedAt    time.Time  `json:"created_at"`
 	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
 }
+
+var peersBucket = []byte("peers")
 
 func storedToRecord(s peerRecordStored) (PeerRecord, error) {
 	if strings.TrimSpace(s.PeerID) == "" {
@@ -89,9 +92,10 @@ func recordToStored(r PeerRecord) peerRecordStored {
 
 type PeerStore struct {
 	mu         sync.RWMutex
-	saveMu     sync.Mutex // serializes SaveToFile calls
+	saveMu     sync.Mutex // serializes bbolt writes
 	peers      map[string]PeerRecord
 	sortedKeys []peerSortKey // maintained in (CreatedAt asc, PeerID asc) order
+	db         *bolt.DB      // nil = in-memory only; open for the lifetime of the store
 }
 
 func NewPeerStore() *PeerStore {
@@ -224,61 +228,134 @@ func (s *PeerStore) ListPaginated(offset, limit int) ([]PeerRecord, int) {
 	return records, total
 }
 
-// LoadFromFile loads peer records from a JSON file (format: allowed_ips for IPv4/IPv6).
-// Existing in-memory peers are replaced. Returns error if file is missing, empty, or invalid.
-func (s *PeerStore) LoadFromFile(path string) error {
-	data, err := os.ReadFile(path)
+// OpenFile opens (or creates) the bbolt DB at path, loads all peer records into
+// memory, and keeps the DB open for incremental persistence. Call Close when done.
+func (s *PeerStore) OpenFile(path string) error {
+	db, err := bolt.Open(path, 0o600, nil)
 	if err != nil {
 		return err
 	}
-	return s.loadFromData(data)
+	if err := s.loadFromDB(db); err != nil {
+		_ = db.Close()
+		return err
+	}
+	s.db = db
+	return nil
 }
 
-// LoadFromFileIfExists loads peer records from a JSON file when persistence is enabled.
-// If the file does not exist (os.ErrNotExist), returns nil and leaves the store empty.
-// If the file exists but is empty, invalid JSON, has duplicate peer_id, or any invalid record, returns an error.
-func (s *PeerStore) LoadFromFileIfExists(path string) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
+// OpenFileIfExists is like OpenFile but returns nil without opening if the file
+// does not exist.
+func (s *PeerStore) OpenFileIfExists(path string) error {
+	if _, err := os.Stat(path); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
 		return err
 	}
-	return s.loadFromData(data)
+	return s.OpenFile(path)
 }
 
-// loadFromData replaces store contents with parsed data. Caller ensures data is read from file.
-// Empty data, invalid JSON, non-array root, duplicate peer_id, or invalid record cause an error.
-func (s *PeerStore) loadFromData(data []byte) error {
-	if len(data) == 0 {
-		return fmt.Errorf("peer store file is empty")
+// Close closes the underlying bbolt DB. Safe to call when no DB is open.
+// Serialized with saveMu so it cannot race with concurrent persist calls.
+func (s *PeerStore) Close() error {
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+	if s.db == nil {
+		return nil
 	}
-	var stored []peerRecordStored
-	if err := json.Unmarshal(data, &stored); err != nil {
-		return fmt.Errorf("peer store file: invalid JSON: %w", err)
+	err := s.db.Close()
+	s.db = nil
+	return err
+}
+
+// PersistPut writes a single peer record to the open DB. No-op if no DB is open.
+func (s *PeerStore) PersistPut(record PeerRecord) error {
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+	if s.db == nil {
+		return nil
 	}
-	if stored == nil {
-		return fmt.Errorf("peer store file: root must be a JSON array, not null")
+	return s.persistPutLocked(record)
+}
+
+// PersistPutIfPresent writes a peer record to the open DB only when the peer
+// is still in the in-memory store with the same public key. This prevents a
+// stale write when a concurrent DeletePeer removes the peer between
+// doEnsurePeer (which releases s.mu) and the caller's persist step.
+// No-op if no DB is open.
+func (s *PeerStore) PersistPutIfPresent(record PeerRecord) error {
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+	if s.db == nil {
+		return nil
 	}
-	seenPeerID := make(map[string]bool, len(stored))
-	seenPublicKey := make(map[wgtypes.Key]bool, len(stored))
+	s.mu.RLock()
+	current, ok := s.peers[record.PeerID]
+	s.mu.RUnlock()
+	if !ok || current.PublicKey != record.PublicKey {
+		return nil
+	}
+	return s.persistPutLocked(record)
+}
+
+func (s *PeerStore) persistPutLocked(record PeerRecord) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b, err := tx.CreateBucketIfNotExists(peersBucket)
+		if err != nil {
+			return err
+		}
+		data, err := json.Marshal(recordToStored(record))
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(record.PeerID), data)
+	})
+}
+
+// PersistDeleteBatch removes peer records from the open DB in a single transaction.
+// No-op if no DB is open or no IDs are provided.
+func (s *PeerStore) PersistDeleteBatch(peerIDs ...string) error {
+	if len(peerIDs) == 0 {
+		return nil
+	}
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+	if s.db == nil {
+		return nil
+	}
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(peersBucket)
+		if b == nil {
+			return nil
+		}
+		for _, id := range peerIDs {
+			if err := b.Delete([]byte(id)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// loadFromDB replaces store contents with peer records read from db.
+func (s *PeerStore) loadFromDB(db *bolt.DB) error {
+	var loaded []PeerRecord
+	err := db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(peersBucket)
+		if b == nil {
+			return nil
+		}
+		var err error
+		loaded, err = readPeersFromBucket(b)
+		return err
+	})
+	if err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.peers = make(map[string]PeerRecord, len(stored))
-	for i := range stored {
-		rec, err := storedToRecord(stored[i])
-		if err != nil {
-			return fmt.Errorf("peer store file: record %d (peer_id %q): %w", i, stored[i].PeerID, err)
-		}
-		if seenPeerID[rec.PeerID] {
-			return fmt.Errorf("peer store file: duplicate peer_id %q", rec.PeerID)
-		}
-		if seenPublicKey[rec.PublicKey] {
-			return fmt.Errorf("peer store file: duplicate public_key in record %d (peer_id %q)", i, rec.PeerID)
-		}
-		seenPeerID[rec.PeerID] = true
-		seenPublicKey[rec.PublicKey] = true
+	s.peers = make(map[string]PeerRecord, len(loaded))
+	for _, rec := range loaded {
 		s.peers[rec.PeerID] = rec
 	}
 	// Rebuild the sorted index from the loaded records in one pass.
@@ -295,34 +372,28 @@ func (s *PeerStore) loadFromData(data []byte) error {
 	return nil
 }
 
-// SaveToFile writes all peer records to a JSON file (allowed_ips).
-// Writes atomically via a temp file and rename. Serialized with saveMu.
-func (s *PeerStore) SaveToFile(path string) error {
-	s.saveMu.Lock()
-	defer s.saveMu.Unlock()
-
-	s.mu.RLock()
-	list := make([]PeerRecord, 0, len(s.peers))
-	for _, r := range s.peers {
-		list = append(list, r)
-	}
-	s.mu.RUnlock()
-
-	stored := make([]peerRecordStored, len(list))
-	for i := range list {
-		stored[i] = recordToStored(list[i])
-	}
-	data, err := json.MarshalIndent(stored, "", "  ")
-	if err != nil {
-		return err
-	}
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		_ = os.Remove(tmpPath)
-		return err
-	}
-	return nil
+// readPeersFromBucket reads and validates all peer records from a bbolt bucket.
+func readPeersFromBucket(b *bolt.Bucket) ([]PeerRecord, error) {
+	seenPublicKey := make(map[wgtypes.Key]bool)
+	var loaded []PeerRecord
+	err := b.ForEach(func(k, v []byte) error {
+		var stored peerRecordStored
+		if err := json.Unmarshal(v, &stored); err != nil {
+			return fmt.Errorf("peer store db: decode peer %q: %w", string(k), err)
+		}
+		rec, err := storedToRecord(stored)
+		if err != nil {
+			return fmt.Errorf("peer store db: peer %q: %w", string(k), err)
+		}
+		if rec.PeerID != string(k) {
+			return fmt.Errorf("peer store db: key/value peer_id mismatch: key=%q value=%q", string(k), rec.PeerID)
+		}
+		if seenPublicKey[rec.PublicKey] {
+			return fmt.Errorf("peer store db: duplicate public_key for peer_id %q", rec.PeerID)
+		}
+		seenPublicKey[rec.PublicKey] = true
+		loaded = append(loaded, rec)
+		return nil
+	})
+	return loaded, err
 }

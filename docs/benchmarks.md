@@ -1,6 +1,6 @@
 # Benchmark Snapshot
 
-Date: 2026-03-21  
+Date: 2026-03-21
 Host: darwin arm64  
 Go packages: `./internal/wireguard ./internal/server`  
 Command:
@@ -13,7 +13,7 @@ Values below use the median of 3 runs for readability.
 
 ## What Is Measured
 
-- `internal/wireguard`: IP allocation, peer lifecycle operations, and in-memory `PeerStore` throughput.
+- `internal/wireguard`: IP allocation, peer lifecycle operations, in-memory `PeerStore` throughput, and bbolt persistence I/O.
 - `internal/server`: REST handler and middleware overhead in test mode.
 - Parallel benchmarks (`*Parallel`) show behavior under concurrent access.
 
@@ -51,6 +51,8 @@ Values below use the median of 3 runs for readability.
 ## Quick Interpretation
 
 - `PeerStore` is very fast and allocation-free on core `Get` and `Set` paths.
+- `PersistPut` (~5.9 ms) is dominated by bbolt's fsync-per-commit guarantee — this is the cost of durability, not code overhead. In-memory operations are unaffected.
+- `OpenFile` (~472 µs for 200 peers) is a one-time startup cost; irrelevant to steady-state throughput.
 - API handlers are fast in absolute terms (sub-microsecond to low-microsecond range), with moderate allocation cost.
 - `BenchmarkAllocateOneIPv4NearlyFull` is intentionally a worst-case scenario and expected to be slower.
 - Current performance baseline is strong; the largest optimization headroom is reducing API handler allocations.
@@ -69,6 +71,8 @@ Values below use the median of 3 runs for readability.
 - `BenchmarkPeerStoreSetParallel`: concurrent write pressure on `PeerStore.Set`.
 - `BenchmarkPeerStoreListPaginated1000`: fetch one paginated page from a 1000-record store.
 - `BenchmarkPeerStoreForEach1000`: iterate all records in a 1000-record store.
+- `BenchmarkPeerStorePersistPut`: write one peer record to the open bbolt DB (one fsync per call).
+- `BenchmarkPeerStoreOpenFile`: open an existing bbolt DB and load 200 peer records into memory (startup cost).
 - `BenchmarkListPeersHandler`: process one `GET /peers` request in test mode.
 - `BenchmarkCreatePeerHandler`: process one `POST /peers` request in test mode.
 - `BenchmarkGetPeerHandler`: process one `GET /peers/:peerId` request in test mode.
@@ -80,29 +84,31 @@ Values below use the median of 3 runs for readability.
 
 | Benchmark | ns/op (median) | B/op | allocs/op |
 |---|---:|---:|---:|
-| BenchmarkAllocateOneIPv4 | 184.0 | 325 | 8 |
-| BenchmarkAllocateOneIPv4NearlyFull | 14323 | 8064 | 510 |
-| BenchmarkAllocateOneIPv6 | 294.3 | 360 | 9 |
-| BenchmarkEnsurePeerRotate | 45424 | 1376 | 25 |
-| BenchmarkEnsurePeerNew | 45913 | ~1902 | 36 |
-| BenchmarkDeletePeer | 2653 | 704 | 10 |
-| BenchmarkPeerStoreSet | 32.28 | 0 | 0 |
-| BenchmarkPeerStoreGet | 17.61 | 0 | 0 |
-| BenchmarkPeerStoreGetParallel | 120.0 | 0 | 0 |
-| BenchmarkPeerStoreSetParallel | 86.52 | 0 | 0 |
-| BenchmarkPeerStoreListPaginated1000 | 1480 | 6912 | 1 |
-| BenchmarkPeerStoreForEach1000 | 14017 | 0 | 0 |
+| BenchmarkAllocateOneIPv4 | 179.0 | 325 | 8 |
+| BenchmarkAllocateOneIPv4NearlyFull | 13803 | 8064 | 510 |
+| BenchmarkAllocateOneIPv6 | 287.5 | 360 | 9 |
+| BenchmarkEnsurePeerRotate | 44132 | 1376 | 25 |
+| BenchmarkEnsurePeerNew | 46176 | 1904 | 36 |
+| BenchmarkDeletePeer | 2554 | 704 | 10 |
+| BenchmarkPeerStoreSet | 33.94 | 0 | 0 |
+| BenchmarkPeerStoreGet | 23.17 | 0 | 0 |
+| BenchmarkPeerStoreGetParallel | 162.1 | 0 | 0 |
+| BenchmarkPeerStoreSetParallel | 139.8 | 0 | 0 |
+| BenchmarkPeerStoreListPaginated1000 | 1374 | 6912 | 1 |
+| BenchmarkPeerStoreForEach1000 | 13490 | 0 | 0 |
+| BenchmarkPeerStorePersistPut | 5988841 | 19992 | 55 |
+| BenchmarkPeerStoreOpenFile | 467836 | 284595 | 3860 |
 
 ## internal/server
 
 | Benchmark | ns/op (median) | B/op | allocs/op |
 |---|---:|---:|---:|
-| BenchmarkListPeersHandler | 5811 | 8442 | 17 |
-| BenchmarkCreatePeerHandler | 3952 | 8304 | 40 |
-| BenchmarkGetPeerHandler | 982.5 | 1441 | 11 |
-| BenchmarkListPeersHandlerParallel | 3004 | ~8517 | 17 |
-| BenchmarkGetPeerHandlerParallel | 580.7 | 1442 | 11 |
-| BenchmarkAPIKeyMiddleware | 200.1 | 224 | 5 |
+| BenchmarkListPeersHandler | 5600 | 8446 | 17 |
+| BenchmarkCreatePeerHandler | 3752 | 8304 | 40 |
+| BenchmarkGetPeerHandler | 961.5 | 1441 | 11 |
+| BenchmarkListPeersHandlerParallel | 3058 | 8521 | 17 |
+| BenchmarkGetPeerHandlerParallel | 591.1 | 1442 | 11 |
+| BenchmarkAPIKeyMiddleware | 191.1 | 224 | 5 |
 
 ## Notes
 
