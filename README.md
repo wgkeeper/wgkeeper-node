@@ -1,5 +1,5 @@
 <p align="center">
-  <img width="900" alt="WGKeeper logo" src="https://github.com/user-attachments/assets/fe1d9daf-f958-4891-b32d-30a7e73178f9" />
+  <img width="900" alt="WGKeeper logo" src="https://github.com/user-attachments/assets/0e8e4b9b-eec4-4b95-b48b-16455b79f732" />
 </p>
 
 <h1 align="center">WGKeeper Node</h1>
