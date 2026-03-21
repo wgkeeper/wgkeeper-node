@@ -339,32 +339,15 @@ func (s *PeerStore) PersistDeleteBatch(peerIDs ...string) error {
 
 // loadFromDB replaces store contents with peer records read from db.
 func (s *PeerStore) loadFromDB(db *bolt.DB) error {
-	loaded := make([]PeerRecord, 0)
-	seenPublicKey := make(map[wgtypes.Key]bool)
+	var loaded []PeerRecord
 	err := db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(peersBucket)
 		if b == nil {
 			return nil
 		}
-		return b.ForEach(func(k, v []byte) error {
-			var stored peerRecordStored
-			if err := json.Unmarshal(v, &stored); err != nil {
-				return fmt.Errorf("peer store db: decode peer %q: %w", string(k), err)
-			}
-			rec, err := storedToRecord(stored)
-			if err != nil {
-				return fmt.Errorf("peer store db: peer %q: %w", string(k), err)
-			}
-			if rec.PeerID != string(k) {
-				return fmt.Errorf("peer store db: key/value peer_id mismatch: key=%q value=%q", string(k), rec.PeerID)
-			}
-			if seenPublicKey[rec.PublicKey] {
-				return fmt.Errorf("peer store db: duplicate public_key for peer_id %q", rec.PeerID)
-			}
-			seenPublicKey[rec.PublicKey] = true
-			loaded = append(loaded, rec)
-			return nil
-		})
+		var err error
+		loaded, err = readPeersFromBucket(b)
+		return err
 	})
 	if err != nil {
 		return err
@@ -387,4 +370,30 @@ func (s *PeerStore) loadFromDB(db *bolt.DB) error {
 		return s.sortedKeys[i].createdAt.Before(s.sortedKeys[j].createdAt)
 	})
 	return nil
+}
+
+// readPeersFromBucket reads and validates all peer records from a bbolt bucket.
+func readPeersFromBucket(b *bolt.Bucket) ([]PeerRecord, error) {
+	seenPublicKey := make(map[wgtypes.Key]bool)
+	var loaded []PeerRecord
+	err := b.ForEach(func(k, v []byte) error {
+		var stored peerRecordStored
+		if err := json.Unmarshal(v, &stored); err != nil {
+			return fmt.Errorf("peer store db: decode peer %q: %w", string(k), err)
+		}
+		rec, err := storedToRecord(stored)
+		if err != nil {
+			return fmt.Errorf("peer store db: peer %q: %w", string(k), err)
+		}
+		if rec.PeerID != string(k) {
+			return fmt.Errorf("peer store db: key/value peer_id mismatch: key=%q value=%q", string(k), rec.PeerID)
+		}
+		if seenPublicKey[rec.PublicKey] {
+			return fmt.Errorf("peer store db: duplicate public_key for peer_id %q", rec.PeerID)
+		}
+		seenPublicKey[rec.PublicKey] = true
+		loaded = append(loaded, rec)
+		return nil
+	})
+	return loaded, err
 }

@@ -17,6 +17,7 @@ const (
 	msgUnexpectedError     = "unexpected error: %v"
 	msgListPeersFmt        = "ListPeers: %v"
 	msgSavePeerStoreErr    = "expected 'save peer store' in error, got %v"
+	peersDBFile            = "/peers.db"
 	persistPathNonexistent = "/nonexistent-dir-xyz/peers.db"
 	savePeerStoreSubstr    = "save peer store"
 	ipServerTest           = "10.0.0.1"
@@ -568,7 +569,7 @@ func TestEnsurePeerNewPeerSavePersistError(t *testing.T) {
 		serverIP4:  net.ParseIP(ipServerTest),
 		store:      NewPeerStore(),
 	}
-	openAndBreakDB(t, svc.store, dir+"/peers.db")
+	openAndBreakDB(t, svc.store, dir+peersDBFile)
 	_, err := svc.EnsurePeer(peerIDNewPeer, nil, nil)
 	if err == nil {
 		t.Fatal("expected error when persist fails for new peer")
@@ -590,7 +591,7 @@ func TestDeletePeerSavePersistError(t *testing.T) {
 		store:      NewPeerStore(),
 	}
 	// Open and break DB first; then set peer so it's in memory for DeletePeer.
-	openAndBreakDB(t, svc.store, dir+"/peers.db")
+	openAndBreakDB(t, svc.store, dir+peersDBFile)
 	svc.store.Set(PeerRecord{
 		PeerID:       peerIDTest,
 		PublicKey:    key,
@@ -619,7 +620,7 @@ func TestEnsurePeerRotateSavePersistError(t *testing.T) {
 		usedIPs:    make(map[string]struct{}),
 	}
 	// Open and break DB first; then set peer so it's in memory for rotate path.
-	openAndBreakDB(t, svc.store, dir+"/peers.db")
+	openAndBreakDB(t, svc.store, dir+peersDBFile)
 	svc.store.Set(PeerRecord{
 		PeerID:       peerIDTest,
 		PublicKey:    key,

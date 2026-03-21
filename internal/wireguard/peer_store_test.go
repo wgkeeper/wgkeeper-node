@@ -16,9 +16,13 @@ import (
 )
 
 const (
-	testAllowedIP  = "10.0.0.1/32"
-	testPeersFile  = "peers.db"
-	testPeerIDSort = "peer-a"
+	testAllowedIP        = "10.0.0.1/32"
+	testPeersFile        = "peers.db"
+	testPeerIDSort       = "peer-a"
+	testAllowedIP2       = "10.0.0.2/32"
+	testPeerIDRotate     = "rotate-peer"
+	errOpenFileFmt       = "OpenFile: %v"
+	errOpenFileReloadFmt = "OpenFile (reload): %v"
 )
 
 func makeStorePeers(t *testing.T, store *PeerStore, n int) {
@@ -81,7 +85,7 @@ func TestSaveToFileAndLoadFromFileRoundtrip(t *testing.T) {
 
 	store := NewPeerStore()
 	if err := store.OpenFile(path); err != nil {
-		t.Fatalf("OpenFile: %v", err)
+		t.Fatalf(errOpenFileFmt, err)
 	}
 	store.Set(rec)
 	if err := store.PersistPut(rec); err != nil {
@@ -91,7 +95,7 @@ func TestSaveToFileAndLoadFromFileRoundtrip(t *testing.T) {
 
 	store2 := NewPeerStore()
 	if err := store2.OpenFile(path); err != nil {
-		t.Fatalf("OpenFile (reload): %v", err)
+		t.Fatalf(errOpenFileReloadFmt, err)
 	}
 	defer store2.Close()
 	got, ok := store2.Get("roundtrip")
@@ -113,7 +117,7 @@ func TestSaveToFileAndLoadFromFileRoundtripWithPresharedKey(t *testing.T) {
 		PeerID:       "roundtrip-psk",
 		PublicKey:    key,
 		PresharedKey: psk,
-		AllowedIPs:   mustParseCIDRs(t, "10.0.0.2/32"),
+		AllowedIPs:   mustParseCIDRs(t, testAllowedIP2),
 		CreatedAt:    time.Now().UTC(),
 		ExpiresAt:    nil,
 	}
@@ -123,7 +127,7 @@ func TestSaveToFileAndLoadFromFileRoundtripWithPresharedKey(t *testing.T) {
 
 	store := NewPeerStore()
 	if err := store.OpenFile(path); err != nil {
-		t.Fatalf("OpenFile: %v", err)
+		t.Fatalf(errOpenFileFmt, err)
 	}
 	store.Set(rec)
 	if err := store.PersistPut(rec); err != nil {
@@ -133,7 +137,7 @@ func TestSaveToFileAndLoadFromFileRoundtripWithPresharedKey(t *testing.T) {
 
 	store2 := NewPeerStore()
 	if err := store2.OpenFile(path); err != nil {
-		t.Fatalf("OpenFile (reload): %v", err)
+		t.Fatalf(errOpenFileReloadFmt, err)
 	}
 	defer store2.Close()
 	got, ok := store2.Get("roundtrip-psk")
@@ -383,7 +387,7 @@ func TestLoadFromFileDuplicatePublicKey(t *testing.T) {
 			PeerID:       "b",
 			PublicKey:    key,
 			PresharedKey: psk,
-			AllowedIPs:   mustParseCIDRs(t, "10.0.0.2/32"),
+			AllowedIPs:   mustParseCIDRs(t, testAllowedIP2),
 			CreatedAt:    time.Now().UTC(),
 		})
 		ba, _ := json.Marshal(ra)
@@ -579,7 +583,7 @@ func TestLoadFromFileRebuildsSortedIndex(t *testing.T) {
 			PeerID:       "b",
 			PublicKey:    key1,
 			PresharedKey: psk1,
-			AllowedIPs:   mustParseCIDRs(t, "10.0.0.2/32"),
+			AllowedIPs:   mustParseCIDRs(t, testAllowedIP2),
 			CreatedAt:    mustTime("2024-01-02T00:00:00Z"),
 		})
 		ra := recordToStored(PeerRecord{
@@ -603,7 +607,7 @@ func TestLoadFromFileRebuildsSortedIndex(t *testing.T) {
 
 	store := NewPeerStore()
 	if err := store.OpenFile(path); err != nil {
-		t.Fatalf("OpenFile: %v", err)
+		t.Fatalf(errOpenFileFmt, err)
 	}
 	defer store.Close()
 	records, total := store.ListPaginated(0, 10)
@@ -613,6 +617,111 @@ func TestLoadFromFileRebuildsSortedIndex(t *testing.T) {
 	// "a" has earlier CreatedAt so it should come first.
 	if records[0].PeerID != "a" || records[1].PeerID != "b" {
 		t.Errorf("expected [a b], got [%s %s]", records[0].PeerID, records[1].PeerID)
+	}
+}
+
+// ---------- readPeersFromBucket ----------
+
+// openTestBucket opens a fresh bbolt DB in a temp dir and calls fn with a
+// writable bucket, then returns a read-only view of the same bucket for the
+// caller to pass to readPeersFromBucket.
+func withTestBucket(t *testing.T, fn func(b *bolt.Bucket) error) ([]PeerRecord, error) {
+	t.Helper()
+	dir := t.TempDir()
+	db, err := bolt.Open(filepath.Join(dir, testPeersFile), 0o600, nil)
+	if err != nil {
+		t.Fatalf("bolt.Open: %v", err)
+	}
+	defer db.Close()
+	if err := db.Update(func(tx *bolt.Tx) error {
+		b, err := tx.CreateBucket(peersBucket)
+		if err != nil {
+			return err
+		}
+		return fn(b)
+	}); err != nil {
+		// fn itself returned an error — surface it as the result.
+		return nil, err
+	}
+	var records []PeerRecord
+	_ = db.View(func(tx *bolt.Tx) error {
+		records, err = readPeersFromBucket(tx.Bucket(peersBucket))
+		return err
+	})
+	return records, err
+}
+
+func TestReadPeersFromBucketValid(t *testing.T) {
+	key, _ := wgtypes.GenerateKey()
+	psk, _ := wgtypes.GenerateKey()
+	rec := PeerRecord{
+		PeerID:       peerIDTest,
+		PublicKey:    key,
+		PresharedKey: psk,
+		AllowedIPs:   mustParseCIDRs(t, testAllowedIP),
+		CreatedAt:    time.Now().UTC(),
+	}
+	records, err := withTestBucket(t, func(b *bolt.Bucket) error {
+		data, _ := json.Marshal(recordToStored(rec))
+		return b.Put([]byte(rec.PeerID), data)
+	})
+	if err != nil {
+		t.Fatalf("readPeersFromBucket: %v", err)
+	}
+	if len(records) != 1 || records[0].PublicKey != key {
+		t.Fatalf("expected 1 valid record, got %v", records)
+	}
+}
+
+func TestReadPeersFromBucketInvalidJSON(t *testing.T) {
+	_, err := withTestBucket(t, func(b *bolt.Bucket) error {
+		return b.Put([]byte(peerIDTest), []byte("not-json"))
+	})
+	if err == nil || !strings.Contains(err.Error(), "decode peer") {
+		t.Fatalf("expected 'decode peer' error, got %v", err)
+	}
+}
+
+func TestReadPeersFromBucketPeerIDMismatch(t *testing.T) {
+	key, _ := wgtypes.GenerateKey()
+	psk, _ := wgtypes.GenerateKey()
+	rec := recordToStored(PeerRecord{
+		PeerID:       "other-id",
+		PublicKey:    key,
+		PresharedKey: psk,
+		AllowedIPs:   mustParseCIDRs(t, testAllowedIP),
+		CreatedAt:    time.Now().UTC(),
+	})
+	_, err := withTestBucket(t, func(b *bolt.Bucket) error {
+		data, _ := json.Marshal(rec)
+		return b.Put([]byte(peerIDTest), data) // key != rec.PeerID
+	})
+	if err == nil || !strings.Contains(err.Error(), "peer_id mismatch") {
+		t.Fatalf("expected 'peer_id mismatch' error, got %v", err)
+	}
+}
+
+func TestReadPeersFromBucketDuplicatePublicKey(t *testing.T) {
+	key, _ := wgtypes.GenerateKey()
+	psk, _ := wgtypes.GenerateKey()
+	ra := recordToStored(PeerRecord{
+		PeerID: "peer-a", PublicKey: key, PresharedKey: psk,
+		AllowedIPs: mustParseCIDRs(t, testAllowedIP), CreatedAt: time.Now().UTC(),
+	})
+	rb := recordToStored(PeerRecord{
+		PeerID: "peer-b", PublicKey: key, PresharedKey: psk,
+		AllowedIPs: mustParseCIDRs(t, testAllowedIP2), CreatedAt: time.Now().UTC(),
+	})
+	_, err := withTestBucket(t, func(b *bolt.Bucket) error {
+		da, _ := json.Marshal(ra)
+		db2, _ := json.Marshal(rb)
+		if err := b.Put([]byte("peer-a"), da); err != nil {
+			return err
+		}
+		return b.Put([]byte("peer-b"), db2)
+	})
+	if err == nil || !strings.Contains(err.Error(), "duplicate public_key") {
+		t.Fatalf("expected 'duplicate public_key' error, got %v", err)
 	}
 }
 
@@ -638,12 +747,12 @@ func TestPersistPutIfPresentSkipsWhenKeyChanged(t *testing.T) {
 
 	store := NewPeerStore()
 	if err := store.OpenFile(path); err != nil {
-		t.Fatalf("OpenFile: %v", err)
+		t.Fatalf(errOpenFileFmt, err)
 	}
 
 	// Store has the peer with key2 (second rotation won).
 	store.Set(PeerRecord{
-		PeerID:       "rotate-peer",
+		PeerID:       testPeerIDRotate,
 		PublicKey:    key2,
 		PresharedKey: psk,
 		AllowedIPs:   ipNet,
@@ -652,7 +761,7 @@ func TestPersistPutIfPresentSkipsWhenKeyChanged(t *testing.T) {
 
 	// PersistPutIfPresent is called with the stale record (key1 from first rotation).
 	stale := PeerRecord{
-		PeerID:       "rotate-peer",
+		PeerID:       testPeerIDRotate,
 		PublicKey:    key1,
 		PresharedKey: psk,
 		AllowedIPs:   ipNet,
@@ -666,10 +775,10 @@ func TestPersistPutIfPresentSkipsWhenKeyChanged(t *testing.T) {
 	// Reopen: DB must not contain the stale key1 record.
 	store2 := NewPeerStore()
 	if err := store2.OpenFile(path); err != nil {
-		t.Fatalf("OpenFile (reload): %v", err)
+		t.Fatalf(errOpenFileReloadFmt, err)
 	}
 	defer store2.Close()
-	if got, ok := store2.Get("rotate-peer"); ok && got.PublicKey == key1 {
+	if got, ok := store2.Get(testPeerIDRotate); ok && got.PublicKey == key1 {
 		t.Fatal("stale key1 record must not be written to DB by PersistPutIfPresent")
 	}
 }
@@ -692,7 +801,7 @@ func TestPersistPutIfPresentSkipsWhenDeleted(t *testing.T) {
 
 	store := NewPeerStore()
 	if err := store.OpenFile(path); err != nil {
-		t.Fatalf("OpenFile: %v", err)
+		t.Fatalf(errOpenFileFmt, err)
 	}
 
 	// Peer is added to store (simulates doEnsurePeer completing) then
@@ -709,7 +818,7 @@ func TestPersistPutIfPresentSkipsWhenDeleted(t *testing.T) {
 	// Reopen and verify the record was NOT written to DB.
 	store2 := NewPeerStore()
 	if err := store2.OpenFile(path); err != nil {
-		t.Fatalf("OpenFile (reload): %v", err)
+		t.Fatalf(errOpenFileReloadFmt, err)
 	}
 	defer store2.Close()
 	if _, ok := store2.Get("race-peer"); ok {

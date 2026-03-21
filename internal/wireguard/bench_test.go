@@ -11,10 +11,11 @@ import (
 )
 
 const (
-	benchSubnet4    = "10.0.0.0/16"
-	benchPeerID     = "bench-peer"
-	benchPeerFmt    = "peer-%d"
-	benchAllowedIP4 = "10.0.0.2/32"
+	benchSubnet4       = "10.0.0.0/16"
+	benchPeerID        = "bench-peer"
+	benchPeerFmt       = "peer-%d"
+	benchAllowedIP4    = "10.0.0.2/32"
+	benchAllowedIP4Fmt = "10.%d.%d.2/32"
 )
 
 // newBenchService returns a WireGuardService wired to a no-op fake client,
@@ -217,7 +218,7 @@ func BenchmarkPeerStoreListPaginated1000(b *testing.B) {
 	store := NewPeerStore()
 	for i := 0; i < 1000; i++ {
 		key, _ := wgtypes.GenerateKey()
-		_, ipn, _ := net.ParseCIDR(fmt.Sprintf("10.%d.%d.2/32", i/256, i%256))
+		_, ipn, _ := net.ParseCIDR(fmt.Sprintf(benchAllowedIP4Fmt, i/256, i%256))
 		store.Set(PeerRecord{
 			PeerID:     fmt.Sprintf(benchPeerFmt, i),
 			PublicKey:  key,
@@ -235,7 +236,7 @@ func BenchmarkPeerStoreForEach1000(b *testing.B) {
 	store := NewPeerStore()
 	for i := 0; i < 1000; i++ {
 		key, _ := wgtypes.GenerateKey()
-		_, ipn, _ := net.ParseCIDR(fmt.Sprintf("10.%d.%d.2/32", i/256, i%256))
+		_, ipn, _ := net.ParseCIDR(fmt.Sprintf(benchAllowedIP4Fmt, i/256, i%256))
 		store.Set(PeerRecord{
 			PeerID:     fmt.Sprintf(benchPeerFmt, i),
 			PublicKey:  key,
@@ -284,7 +285,7 @@ func BenchmarkPeerStoreOpenFile(b *testing.B) {
 	for i := 0; i < 200; i++ {
 		key, _ := wgtypes.GenerateKey()
 		psk, _ := wgtypes.GenerateKey()
-		_, ipn, _ := net.ParseCIDR(fmt.Sprintf("10.%d.%d.2/32", i/256, i%256))
+		_, ipn, _ := net.ParseCIDR(fmt.Sprintf(benchAllowedIP4Fmt, i/256, i%256))
 		records[i] = PeerRecord{
 			PeerID:       fmt.Sprintf(benchPeerFmt, i),
 			PublicKey:    key,
