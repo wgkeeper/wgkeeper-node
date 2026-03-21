@@ -84,31 +84,31 @@ Values below use the median of 3 runs for readability.
 
 | Benchmark | ns/op (median) | B/op | allocs/op |
 |---|---:|---:|---:|
-| BenchmarkAllocateOneIPv4 | 180.7 | 325 | 8 |
-| BenchmarkAllocateOneIPv4NearlyFull | 13814 | 8064 | 510 |
-| BenchmarkAllocateOneIPv6 | 281.9 | 360 | 9 |
-| BenchmarkEnsurePeerRotate | 44123 | 1376 | 25 |
-| BenchmarkEnsurePeerNew | 45760 | 1904 | 36 |
-| BenchmarkDeletePeer | 2571 | 704 | 10 |
-| BenchmarkPeerStoreSet | 33.80 | 0 | 0 |
-| BenchmarkPeerStoreGet | 23.43 | 0 | 0 |
-| BenchmarkPeerStoreGetParallel | 159.5 | 0 | 0 |
-| BenchmarkPeerStoreSetParallel | 140.2 | 0 | 0 |
-| BenchmarkPeerStoreListPaginated1000 | 1377 | 6912 | 1 |
-| BenchmarkPeerStoreForEach1000 | 13620 | 0 | 0 |
-| BenchmarkPeerStorePersistPut | 5894497 | 19988 | 55 |
-| BenchmarkPeerStoreOpenFile | 472171 | 284596 | 3860 |
+| BenchmarkAllocateOneIPv4 | 179.0 | 325 | 8 |
+| BenchmarkAllocateOneIPv4NearlyFull | 13803 | 8064 | 510 |
+| BenchmarkAllocateOneIPv6 | 287.5 | 360 | 9 |
+| BenchmarkEnsurePeerRotate | 44132 | 1376 | 25 |
+| BenchmarkEnsurePeerNew | 46176 | 1904 | 36 |
+| BenchmarkDeletePeer | 2554 | 704 | 10 |
+| BenchmarkPeerStoreSet | 33.94 | 0 | 0 |
+| BenchmarkPeerStoreGet | 23.17 | 0 | 0 |
+| BenchmarkPeerStoreGetParallel | 162.1 | 0 | 0 |
+| BenchmarkPeerStoreSetParallel | 139.8 | 0 | 0 |
+| BenchmarkPeerStoreListPaginated1000 | 1374 | 6912 | 1 |
+| BenchmarkPeerStoreForEach1000 | 13490 | 0 | 0 |
+| BenchmarkPeerStorePersistPut | 5988841 | 19992 | 55 |
+| BenchmarkPeerStoreOpenFile | 467836 | 284595 | 3860 |
 
 ## internal/server
 
 | Benchmark | ns/op (median) | B/op | allocs/op |
 |---|---:|---:|---:|
-| BenchmarkListPeersHandler | 5583 | 8444 | 17 |
-| BenchmarkCreatePeerHandler | 3732 | 8305 | 40 |
-| BenchmarkGetPeerHandler | 959.0 | 1441 | 11 |
-| BenchmarkListPeersHandlerParallel | 2884 | 8509 | 17 |
-| BenchmarkGetPeerHandlerParallel | 571.3 | 1442 | 11 |
-| BenchmarkAPIKeyMiddleware | 191.0 | 224 | 5 |
+| BenchmarkListPeersHandler | 5600 | 8446 | 17 |
+| BenchmarkCreatePeerHandler | 3752 | 8304 | 40 |
+| BenchmarkGetPeerHandler | 961.5 | 1441 | 11 |
+| BenchmarkListPeersHandlerParallel | 3058 | 8521 | 17 |
+| BenchmarkGetPeerHandlerParallel | 591.1 | 1442 | 11 |
+| BenchmarkAPIKeyMiddleware | 191.1 | 224 | 5 |
 
 ## Notes
 
