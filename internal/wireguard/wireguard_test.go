@@ -481,6 +481,9 @@ func TestPersistPutNoopWhenNoDB(t *testing.T) {
 	if err := store.PersistPut(rec); err != nil {
 		t.Fatalf("PersistPut with no DB open: expected nil, got %v", err)
 	}
+	if err := store.PersistPutIfPresent(rec); err != nil {
+		t.Fatalf("PersistPutIfPresent with no DB open: expected nil, got %v", err)
+	}
 	if err := store.PersistDeleteBatch(peerIDTest); err != nil {
 		t.Fatalf("PersistDeleteBatch with no DB open: expected nil, got %v", err)
 	}

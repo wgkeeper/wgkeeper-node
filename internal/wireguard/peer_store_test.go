@@ -624,6 +624,56 @@ func mustTime(ts string) time.Time {
 	return t
 }
 
+// TestPersistPutIfPresentSkipsWhenKeyChanged verifies that PersistPutIfPresent
+// does not write to DB when the peer's public key in the store differs from the
+// record being persisted (simulates two concurrent EnsurePeer rotations where
+// the second rotation wins and the first must not overwrite the newer record).
+func TestPersistPutIfPresentSkipsWhenKeyChanged(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, testPeersFile)
+	key1, _ := wgtypes.GenerateKey()
+	key2, _ := wgtypes.GenerateKey()
+	psk, _ := wgtypes.GenerateKey()
+	ipNet := mustParseCIDRs(t, testAllowedIP)
+
+	store := NewPeerStore()
+	if err := store.OpenFile(path); err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+
+	// Store has the peer with key2 (second rotation won).
+	store.Set(PeerRecord{
+		PeerID:       "rotate-peer",
+		PublicKey:    key2,
+		PresharedKey: psk,
+		AllowedIPs:   ipNet,
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	// PersistPutIfPresent is called with the stale record (key1 from first rotation).
+	stale := PeerRecord{
+		PeerID:       "rotate-peer",
+		PublicKey:    key1,
+		PresharedKey: psk,
+		AllowedIPs:   ipNet,
+		CreatedAt:    time.Now().UTC(),
+	}
+	if err := store.PersistPutIfPresent(stale); err != nil {
+		t.Fatalf("PersistPutIfPresent: %v", err)
+	}
+	store.Close()
+
+	// Reopen: DB must not contain the stale key1 record.
+	store2 := NewPeerStore()
+	if err := store2.OpenFile(path); err != nil {
+		t.Fatalf("OpenFile (reload): %v", err)
+	}
+	defer store2.Close()
+	if got, ok := store2.Get("rotate-peer"); ok && got.PublicKey == key1 {
+		t.Fatal("stale key1 record must not be written to DB by PersistPutIfPresent")
+	}
+}
+
 // TestPersistPutIfPresentSkipsWhenDeleted verifies that PersistPutIfPresent
 // does not write to DB when the peer has been removed from the in-memory store
 // (simulates a concurrent DeletePeer racing with EnsurePeer's persist step).
