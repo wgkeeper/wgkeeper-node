@@ -1,0 +1,16 @@
+{
+	# Global options block (optional)
+	# email you@example.com
+}
+
+api.example.com  {
+	encode gzip zstd
+
+	# If you use your own certificates (paths are just examples)
+    # tls /etc/ssl/certs/api.example.com.crt /etc/ssl/private/api.example.com.key
+
+	# Forward all HTTP traffic to the wgkeeper-node API inside Docker
+	# Default API port is 51821 (see config.yaml -> server.port)
+	reverse_proxy wireguard:51821
+}
+

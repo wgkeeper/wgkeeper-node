@@ -1,0 +1,710 @@
+package wireguard
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
+)
+
+const (
+	msgUnexpectedError     = "unexpected error: %v"
+	msgListPeersFmt        = "ListPeers: %v"
+	msgSavePeerStoreErr    = "expected 'save peer store' in error, got %v"
+	persistPathNonexistent = "/nonexistent-dir-xyz/peers.json"
+	savePeerStoreSubstr    = "save peer store"
+	ipServerTest           = "10.0.0.1"
+	ipPeerTest             = "10.0.0.2"
+	peerIDTest             = "peer-1"
+	peerIDNewPeer          = "new-peer"
+	subnetTestCIDR         = "10.0.0.0/24"
+	subnetSmallTestCIDR    = "10.0.0.0/29"
+)
+
+type fakeWGClient struct {
+	device       *wgtypes.Device
+	err          error
+	configureErr error
+}
+
+func (f fakeWGClient) Device(_ string) (*wgtypes.Device, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.device, nil
+}
+
+func (f fakeWGClient) ConfigureDevice(_ string, _ wgtypes.Config) error {
+	return f.configureErr
+}
+
+func ipNet(t *testing.T, ip string) net.IPNet {
+	t.Helper()
+	_, n, err := net.ParseCIDR(fmt.Sprintf("%s/32", ip))
+	if err != nil {
+		t.Fatalf("parse cidr: %v", err)
+	}
+	return *n
+}
+
+func TestValidateAddressFamiliesEmptyReturnsNodeFamilies(t *testing.T) {
+	_, subnet4, _ := net.ParseCIDR(subnetTestCIDR)
+	svc := &WireGuardService{subnet4: subnet4, serverIP4: net.ParseIP(ipServerTest), store: NewPeerStore()}
+	families, err := svc.ValidateAddressFamilies(nil)
+	if err != nil {
+		t.Fatalf(msgUnexpectedError, err)
+	}
+	if len(families) != 1 || families[0] != FamilyIPv4 {
+		t.Fatalf("expected [IPv4], got %v", families)
+	}
+}
+
+func TestValidateAddressFamiliesUnsupported(t *testing.T) {
+	_, subnet4, _ := net.ParseCIDR(subnetTestCIDR)
+	svc := &WireGuardService{subnet4: subnet4, serverIP4: net.ParseIP(ipServerTest), store: NewPeerStore()}
+	_, err := svc.ValidateAddressFamilies([]string{FamilyIPv6})
+	if !errors.Is(err, ErrUnsupportedAddressFamily) {
+		t.Fatalf("expected ErrUnsupportedAddressFamily, got %v", err)
+	}
+}
+
+func TestResolveServerIP4(t *testing.T) {
+	_, subnet, _ := net.ParseCIDR(subnetTestCIDR)
+
+	ip, err := resolveServerIP4(subnet, "10.0.0.10")
+	if err != nil {
+		t.Fatalf(msgUnexpectedError, err)
+	}
+	if ip.String() != "10.0.0.10" {
+		t.Fatalf("unexpected ip: %s", ip.String())
+	}
+
+	if _, err := resolveServerIP4(subnet, "10.0.1.10"); err == nil {
+		t.Fatalf("expected error for IP outside subnet")
+	}
+}
+
+func newTestServiceWithSubnet29(t *testing.T, device *wgtypes.Device) *WireGuardService {
+	t.Helper()
+	_, subnet, _ := net.ParseCIDR(subnetSmallTestCIDR)
+	return &WireGuardService{
+		client:     fakeWGClient{device: device},
+		deviceName: "wg0",
+		subnet4:    subnet,
+		serverIP4:  net.ParseIP(ipServerTest),
+		store:      NewPeerStore(),
+	}
+}
+
+func TestAllocateIPSkipsUsed(t *testing.T) {
+	svc := newTestServiceWithSubnet29(t, &wgtypes.Device{})
+	svc.store.Set(PeerRecord{
+		PeerID:       peerIDTest,
+		PublicKey:    wgtypes.Key{},
+		PresharedKey: wgtypes.Key{},
+		AllowedIPs:   []net.IPNet{ipNet(t, ipPeerTest)},
+	})
+	svc.store.Set(PeerRecord{
+		PeerID:       "peer-2",
+		PublicKey:    wgtypes.Key{1},
+		PresharedKey: wgtypes.Key{},
+		AllowedIPs:   []net.IPNet{ipNet(t, "10.0.0.3")},
+	})
+
+	ips, err := svc.allocateIPs([]string{FamilyIPv4})
+	if err != nil {
+		t.Fatalf(msgUnexpectedError, err)
+	}
+	if len(ips) != 1 || ips[0].IP.String() != "10.0.0.4" {
+		t.Fatalf("expected [10.0.0.4/32], got %v", ips)
+	}
+}
+
+func TestAllocateIPReusesFreedAddress(t *testing.T) {
+	// Allocate .2, then free it; next allocation must reuse .2 (not advance to .3).
+	svc := newTestServiceWithSubnet29(t, &wgtypes.Device{})
+
+	ips1, err := svc.allocateIPs([]string{FamilyIPv4})
+	if err != nil {
+		t.Fatalf(msgUnexpectedError, err)
+	}
+	allocated := ips1[0].IP.String()
+
+	// Simulate freeing the address (as removePeerUnsafe would do).
+	delete(svc.usedIPs, allocated)
+	svc.retractAllocHint(ips1[0].IP)
+
+	ips2, err := svc.allocateIPs([]string{FamilyIPv4})
+	if err != nil {
+		t.Fatalf(msgUnexpectedError, err)
+	}
+	if ips2[0].IP.String() != allocated {
+		t.Errorf("expected freed IP %s to be reused, got %s", allocated, ips2[0].IP.String())
+	}
+}
+
+func TestAllocateIPNoAvailable(t *testing.T) {
+	_, subnet, _ := net.ParseCIDR("10.0.0.0/30")
+	serverIP := net.ParseIP(ipServerTest)
+
+	svc := &WireGuardService{
+		client:     fakeWGClient{device: &wgtypes.Device{}},
+		deviceName: "wg0",
+		subnet4:    subnet,
+		serverIP4:  serverIP,
+		store:      NewPeerStore(),
+	}
+	svc.store.Set(PeerRecord{
+		PeerID:       peerIDTest,
+		PublicKey:    wgtypes.Key{},
+		PresharedKey: wgtypes.Key{},
+		AllowedIPs:   []net.IPNet{ipNet(t, ipPeerTest)},
+	})
+
+	_, err := svc.allocateIPs([]string{FamilyIPv4})
+	if !errors.Is(err, ErrNoAvailableIP) {
+		t.Fatalf("expected ErrNoAvailableIP, got %v", err)
+	}
+}
+
+func TestStatsActivePeers(t *testing.T) {
+	_, subnet, _ := net.ParseCIDR(subnetSmallTestCIDR)
+	serverIP := net.ParseIP(ipServerTest)
+	now := time.Now()
+
+	device := &wgtypes.Device{
+		Peers: []wgtypes.Peer{
+			{LastHandshakeTime: now.Add(-1 * time.Minute)},
+			{LastHandshakeTime: now.Add(-10 * time.Minute)},
+		},
+	}
+
+	svc := &WireGuardService{
+		client:     fakeWGClient{device: device},
+		deviceName: "wg0",
+		subnet4:    subnet,
+		serverIP4:  serverIP,
+		store:      NewPeerStore(),
+	}
+	svc.store.Set(PeerRecord{
+		PeerID:       peerIDTest,
+		PublicKey:    wgtypes.Key{},
+		PresharedKey: wgtypes.Key{},
+		AllowedIPs:   []net.IPNet{ipNet(t, ipPeerTest)},
+	})
+
+	stats, err := svc.Stats()
+	if err != nil {
+		t.Fatalf(msgUnexpectedError, err)
+	}
+	if stats.Peers.Active != 1 {
+		t.Fatalf("expected 1 active peer, got %d", stats.Peers.Active)
+	}
+	if stats.Peers.Issued != 1 {
+		t.Fatalf("expected 1 issued peer, got %d", stats.Peers.Issued)
+	}
+}
+
+func newTestServiceWithSubnet(t *testing.T, configureErr error) *WireGuardService {
+	t.Helper()
+	_, subnet4, _ := net.ParseCIDR(subnetTestCIDR)
+	return &WireGuardService{
+		client:     fakeWGClient{device: &wgtypes.Device{}, configureErr: configureErr},
+		deviceName: "wg0",
+		subnet4:    subnet4,
+		serverIP4:  net.ParseIP(ipServerTest),
+		store:      NewPeerStore(),
+	}
+}
+
+func TestRunExpiredPeersCleanupExitsOnContextCancel(t *testing.T) {
+	svc := newTestServiceWithSubnet(t, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		svc.RunExpiredPeersCleanup(ctx, time.Minute)
+		close(done)
+	}()
+	cancel()
+	select {
+	case <-done:
+		// expected
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunExpiredPeersCleanup did not exit after context cancel")
+	}
+}
+
+func TestRunExpiredPeersCleanupRemovesExpiredPeer(t *testing.T) {
+	svc := newTestServiceWithSubnet(t, nil)
+	expiredAt := time.Now().UTC().Add(-time.Hour)
+	key, _ := wgtypes.GenerateKey()
+	svc.store.Set(PeerRecord{
+		PeerID:       "expired-peer",
+		PublicKey:    key,
+		PresharedKey: wgtypes.Key{},
+		AllowedIPs:   []net.IPNet{ipNet(t, ipPeerTest)},
+		CreatedAt:    time.Now().UTC(),
+		ExpiresAt:    &expiredAt,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go svc.RunExpiredPeersCleanup(ctx, 10*time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
+
+	list, _, err := svc.ListPeers(0, 0)
+	if err != nil {
+		t.Fatalf(msgListPeersFmt, err)
+	}
+	if len(list) != 0 {
+		t.Errorf("expected 0 peers after cleanup, got %d", len(list))
+	}
+}
+
+func TestRunExpiredPeersCleanupKeepsPermanentPeer(t *testing.T) {
+	svc := newTestServiceWithSubnet(t, nil)
+	key, _ := wgtypes.GenerateKey()
+	svc.store.Set(PeerRecord{
+		PeerID:       "permanent-peer",
+		PublicKey:    key,
+		PresharedKey: wgtypes.Key{},
+		AllowedIPs:   []net.IPNet{ipNet(t, ipPeerTest)},
+		CreatedAt:    time.Now().UTC(),
+		ExpiresAt:    nil, // permanent
+	})
+
+	svc.runCleanupSafe()
+	time.Sleep(10 * time.Millisecond)
+
+	list, _, err := svc.ListPeers(0, 0)
+	if err != nil {
+		t.Fatalf(msgListPeersFmt, err)
+	}
+	if len(list) != 1 || list[0].PeerID != "permanent-peer" {
+		t.Errorf("expected 1 permanent peer to remain, got %v", list)
+	}
+}
+
+func TestCleanupExpiredPeersNotYetExpired(t *testing.T) {
+	svc := newTestServiceWithSubnet(t, nil)
+	future := time.Now().UTC().Add(time.Hour)
+	key, _ := wgtypes.GenerateKey()
+	svc.store.Set(PeerRecord{
+		PeerID:       "not-yet-expired",
+		PublicKey:    key,
+		PresharedKey: wgtypes.Key{},
+		AllowedIPs:   []net.IPNet{ipNet(t, ipPeerTest)},
+		CreatedAt:    time.Now().UTC(),
+		ExpiresAt:    &future,
+	})
+	svc.runCleanupSafe()
+
+	list, _, err := svc.ListPeers(0, 0)
+	if err != nil {
+		t.Fatalf(msgListPeersFmt, err)
+	}
+	if len(list) != 1 {
+		t.Errorf("peer with future ExpiresAt should remain, got %d peers", len(list))
+	}
+}
+
+func TestCleanupExpiredPeersDeletePeerError(t *testing.T) {
+	svc := newTestServiceWithSubnet(t, errors.New("device busy"))
+	expiredAt := time.Now().UTC().Add(-time.Hour)
+	key, _ := wgtypes.GenerateKey()
+	svc.store.Set(PeerRecord{
+		PeerID:       "expired-fail",
+		PublicKey:    key,
+		PresharedKey: wgtypes.Key{},
+		AllowedIPs:   []net.IPNet{ipNet(t, ipPeerTest)},
+		CreatedAt:    time.Now().UTC(),
+		ExpiresAt:    &expiredAt,
+	})
+	svc.runCleanupSafe()
+	list, _, err := svc.ListPeers(0, 0)
+	if err != nil {
+		t.Fatalf(msgListPeersFmt, err)
+	}
+	if len(list) != 1 {
+		t.Errorf("peer should remain when DeletePeer fails, got %d peers", len(list))
+	}
+}
+
+func TestGetPeerSuccess(t *testing.T) {
+	_, subnet4, _ := net.ParseCIDR(subnetTestCIDR)
+	key, _ := wgtypes.GenerateKey()
+	device := &wgtypes.Device{
+		Peers: []wgtypes.Peer{
+			{PublicKey: key, ReceiveBytes: 100, TransmitBytes: 200},
+		},
+	}
+	svc := &WireGuardService{
+		client:     fakeWGClient{device: device},
+		deviceName: "wg0",
+		subnet4:    subnet4,
+		serverIP4:  net.ParseIP(ipServerTest),
+		store:      NewPeerStore(),
+	}
+	svc.store.Set(PeerRecord{
+		PeerID:       peerIDTest,
+		PublicKey:    key,
+		PresharedKey: wgtypes.Key{},
+		AllowedIPs:   []net.IPNet{ipNet(t, ipPeerTest)},
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	detail, err := svc.GetPeer(peerIDTest)
+	if err != nil {
+		t.Fatalf("GetPeer: %v", err)
+	}
+	if detail.PeerID != peerIDTest || detail.ReceiveBytes != 100 || detail.TransmitBytes != 200 {
+		t.Errorf("unexpected detail: %+v", detail)
+	}
+}
+
+func TestGetPeerNotFound(t *testing.T) {
+	_, subnet4, _ := net.ParseCIDR(subnetTestCIDR)
+	svc := &WireGuardService{
+		client:     fakeWGClient{device: &wgtypes.Device{}},
+		deviceName: "wg0",
+		subnet4:    subnet4,
+		serverIP4:  net.ParseIP(ipServerTest),
+		store:      NewPeerStore(),
+	}
+	_, err := svc.GetPeer("nonexistent")
+	if !errors.Is(err, ErrPeerNotFound) {
+		t.Fatalf("expected ErrPeerNotFound, got %v", err)
+	}
+}
+
+func TestGetPeerDeviceError(t *testing.T) {
+	_, subnet4, _ := net.ParseCIDR(subnetTestCIDR)
+	key, _ := wgtypes.GenerateKey()
+	svc := &WireGuardService{
+		client:     fakeWGClient{err: errors.New("device error")},
+		deviceName: "wg0",
+		subnet4:    subnet4,
+		serverIP4:  net.ParseIP(ipServerTest),
+		store:      NewPeerStore(),
+	}
+	svc.store.Set(PeerRecord{PeerID: peerIDTest, PublicKey: key, PresharedKey: wgtypes.Key{}, AllowedIPs: []net.IPNet{ipNet(t, ipPeerTest)}})
+	_, err := svc.GetPeer(peerIDTest)
+	if err == nil {
+		t.Fatal("expected error when device fails")
+	}
+}
+
+func TestServerInfo(t *testing.T) {
+	key, _ := wgtypes.GenerateKey()
+	device := &wgtypes.Device{PublicKey: key, ListenPort: 51820}
+	svc := &WireGuardService{
+		client:     fakeWGClient{device: device},
+		deviceName: "wg0",
+		store:      NewPeerStore(),
+	}
+	pub, port, err := svc.ServerInfo()
+	if err != nil {
+		t.Fatalf("ServerInfo: %v", err)
+	}
+	if pub != key.String() || port != 51820 {
+		t.Errorf("got publicKey=%s port=%d", pub, port)
+	}
+}
+
+func TestRecordAllowedIPsInSubnets(t *testing.T) {
+	_, subnet4, _ := net.ParseCIDR(subnetTestCIDR)
+	_, subnet6, _ := net.ParseCIDR(subnet6TestCIDR64)
+	svc := &WireGuardService{
+		subnet4:   subnet4,
+		serverIP4: net.ParseIP(ipServerTest),
+		subnet6:   subnet6,
+		serverIP6: net.ParseIP(ipv6TestAddr1),
+		store:     NewPeerStore(),
+	}
+
+	recIn := PeerRecord{PresharedKey: wgtypes.Key{}, AllowedIPs: []net.IPNet{ipNet(t, "10.0.0.2"), ipNet6(t, "fd00::2")}}
+	if !svc.recordAllowedIPsInSubnets(recIn) {
+		t.Error("expected true for IPs in both subnets")
+	}
+
+	recOut := PeerRecord{PresharedKey: wgtypes.Key{}, AllowedIPs: []net.IPNet{ipNet(t, "192.168.1.1")}}
+	if svc.recordAllowedIPsInSubnets(recOut) {
+		t.Error("expected false for IP outside subnets")
+	}
+
+	svc4Only := &WireGuardService{subnet4: subnet4, serverIP4: net.ParseIP(ipServerTest), store: NewPeerStore()}
+	rec4 := PeerRecord{PresharedKey: wgtypes.Key{}, AllowedIPs: []net.IPNet{ipNet(t, "10.0.0.3")}}
+	if !svc4Only.recordAllowedIPsInSubnets(rec4) {
+		t.Error("expected true for IPv4 in subnet")
+	}
+}
+
+func ipNet6(t *testing.T, ip string) net.IPNet {
+	t.Helper()
+	_, n, err := net.ParseCIDR(ip + "/128")
+	if err != nil {
+		t.Fatalf("parse cidr: %v", err)
+	}
+	return *n
+}
+
+func TestSavePersist(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/peers.json"
+	svc := &WireGuardService{store: NewPeerStore(), persistPath: path}
+	if err := svc.savePersist(); err != nil {
+		t.Fatalf("savePersist: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("file should exist: %v", err)
+	}
+}
+
+func TestSavePersistNoPath(t *testing.T) {
+	svc := &WireGuardService{store: NewPeerStore(), persistPath: ""}
+	if err := svc.savePersist(); err != nil {
+		t.Fatalf("savePersist with empty path: %v", err)
+	}
+}
+
+func TestEnsurePeerNewPeer(t *testing.T) {
+	_, subnet4, _ := net.ParseCIDR(subnetSmallTestCIDR)
+	svc := &WireGuardService{
+		client:     fakeWGClient{device: &wgtypes.Device{}},
+		deviceName: "wg0",
+		subnet4:    subnet4,
+		serverIP4:  net.ParseIP(ipServerTest),
+		store:      NewPeerStore(),
+	}
+	info, err := svc.EnsurePeer(peerIDNewPeer, nil, nil)
+	if err != nil {
+		t.Fatalf("EnsurePeer: %v", err)
+	}
+	if info.PeerID != peerIDNewPeer || info.PublicKey == "" || info.PrivateKey == "" {
+		t.Errorf("unexpected PeerInfo: %+v", info)
+	}
+	if len(info.AllowedIPs) != 1 || !strings.Contains(info.AllowedIPs[0], "10.0.0.") {
+		t.Errorf("unexpected AllowedIPs: %v", info.AllowedIPs)
+	}
+	_, ok := svc.store.Get(peerIDNewPeer)
+	if !ok {
+		t.Error("peer should be in store")
+	}
+}
+
+func TestEnsurePeerNoAvailableIP(t *testing.T) {
+	// /30 gives only 2 usable IPs (.1=server, .2=only peer slot)
+	_, subnet, _ := net.ParseCIDR("10.0.0.0/30")
+	svc := &WireGuardService{
+		client:     fakeWGClient{device: &wgtypes.Device{}},
+		deviceName: "wg0",
+		subnet4:    subnet,
+		serverIP4:  net.ParseIP(ipServerTest),
+		store:      NewPeerStore(),
+	}
+	// occupy the only usable IP
+	svc.store.Set(PeerRecord{
+		PeerID:       peerIDTest,
+		PublicKey:    wgtypes.Key{},
+		PresharedKey: wgtypes.Key{},
+		AllowedIPs:   []net.IPNet{ipNet(t, ipPeerTest)},
+	})
+
+	_, err := svc.EnsurePeer("new-peer-no-ip", nil, nil)
+	if !errors.Is(err, ErrNoAvailableIP) {
+		t.Fatalf("expected ErrNoAvailableIP, got %v", err)
+	}
+}
+
+func TestRunCleanupSafePanicRecovery(t *testing.T) {
+	// nil store will cause a panic inside cleanupExpiredPeers; runCleanupSafe must recover it
+	svc := &WireGuardService{store: nil}
+	// Should not panic
+	svc.runCleanupSafe()
+}
+
+func TestEnsurePeerNewPeerSavePersistError(t *testing.T) {
+	_, subnet4, _ := net.ParseCIDR(subnetTestCIDR)
+	svc := &WireGuardService{
+		client:      fakeWGClient{device: &wgtypes.Device{}},
+		deviceName:  "wg0",
+		subnet4:     subnet4,
+		serverIP4:   net.ParseIP(ipServerTest),
+		store:       NewPeerStore(),
+		persistPath: persistPathNonexistent,
+	}
+	_, err := svc.EnsurePeer(peerIDNewPeer, nil, nil)
+	if err == nil {
+		t.Fatal("expected error when savePersist fails for new peer")
+	}
+	if !strings.Contains(err.Error(), savePeerStoreSubstr) {
+		t.Errorf(msgSavePeerStoreErr, err)
+	}
+}
+
+func TestDeletePeerSavePersistError(t *testing.T) {
+	_, subnet4, _ := net.ParseCIDR(subnetTestCIDR)
+	key, _ := wgtypes.GenerateKey()
+	svc := &WireGuardService{
+		client:      fakeWGClient{},
+		deviceName:  "wg0",
+		subnet4:     subnet4,
+		serverIP4:   net.ParseIP(ipServerTest),
+		store:       NewPeerStore(),
+		persistPath: persistPathNonexistent,
+	}
+	svc.store.Set(PeerRecord{
+		PeerID:       peerIDTest,
+		PublicKey:    key,
+		PresharedKey: wgtypes.Key{},
+		AllowedIPs:   []net.IPNet{ipNet(t, ipPeerTest)},
+	})
+	err := svc.DeletePeer(peerIDTest)
+	if err == nil {
+		t.Fatal("expected error when savePersist fails after delete")
+	}
+	if !strings.Contains(err.Error(), savePeerStoreSubstr) {
+		t.Errorf(msgSavePeerStoreErr, err)
+	}
+}
+
+func TestEnsurePeerRotateSavePersistError(t *testing.T) {
+	_, subnet4, _ := net.ParseCIDR(subnetTestCIDR)
+	key, _ := wgtypes.GenerateKey()
+	svc := &WireGuardService{
+		client:      fakeWGClient{device: &wgtypes.Device{}},
+		deviceName:  "wg0",
+		subnet4:     subnet4,
+		serverIP4:   net.ParseIP(ipServerTest),
+		store:       NewPeerStore(),
+		persistPath: persistPathNonexistent,
+	}
+	svc.store.Set(PeerRecord{
+		PeerID:       peerIDTest,
+		PublicKey:    key,
+		PresharedKey: wgtypes.Key{},
+		AllowedIPs:   []net.IPNet{ipNet(t, ipPeerTest)},
+		CreatedAt:    time.Now().UTC(),
+	})
+	_, err := svc.EnsurePeer(peerIDTest, nil, nil)
+	if err == nil {
+		t.Fatal("expected error when savePersist fails during rotation")
+	}
+	if !strings.Contains(err.Error(), savePeerStoreSubstr) {
+		t.Errorf(msgSavePeerStoreErr, err)
+	}
+}
+
+func TestNodeAddressFamiliesNone(t *testing.T) {
+	svc := &WireGuardService{}
+	fams := svc.NodeAddressFamilies()
+	if len(fams) != 0 {
+		t.Fatalf("expected 0 families, got %v", fams)
+	}
+}
+
+func TestPeerRecordToListItemWithExpiresAt(t *testing.T) {
+	future := time.Now().Add(time.Hour).UTC()
+	rec := PeerRecord{
+		PeerID:       peerIDTest,
+		PresharedKey: wgtypes.Key{},
+		AllowedIPs:   []net.IPNet{ipNet(t, ipPeerTest)},
+		CreatedAt:    time.Now().UTC(),
+		ExpiresAt:    &future,
+	}
+	item := peerRecordToListItem(rec, wgtypes.Peer{}, time.Now())
+	if item.ExpiresAt == nil {
+		t.Fatal("expected ExpiresAt to be non-nil")
+	}
+	if *item.ExpiresAt == "" {
+		t.Error("expected non-empty ExpiresAt string")
+	}
+}
+
+func TestRemovePeerUnsafeRemovesFromStoreAndUsedIPs(t *testing.T) {
+	svc := newTestServiceWithSubnet(t, nil)
+	key, _ := wgtypes.GenerateKey()
+	peerIP := ipNet(t, ipPeerTest)
+	record := PeerRecord{
+		PeerID:       peerIDTest,
+		PublicKey:    key,
+		PresharedKey: wgtypes.Key{},
+		AllowedIPs:   []net.IPNet{peerIP},
+		CreatedAt:    time.Now().UTC(),
+	}
+	svc.store.Set(record)
+	svc.usedIPs = map[string]struct{}{ipPeerTest: {}}
+
+	if err := svc.removePeerUnsafe(record); err != nil {
+		t.Fatalf("removePeerUnsafe: %v", err)
+	}
+	if _, ok := svc.store.Get(peerIDTest); ok {
+		t.Error("peer should be removed from store")
+	}
+	if _, ok := svc.usedIPs[ipPeerTest]; ok {
+		t.Error("IP should be removed from usedIPs")
+	}
+}
+
+func TestRemovePeerUnsafeDeviceError(t *testing.T) {
+	svc := newTestServiceWithSubnet(t, errors.New("device busy"))
+	key, _ := wgtypes.GenerateKey()
+	record := PeerRecord{
+		PeerID:       peerIDTest,
+		PublicKey:    key,
+		PresharedKey: wgtypes.Key{},
+		AllowedIPs:   []net.IPNet{ipNet(t, ipPeerTest)},
+		CreatedAt:    time.Now().UTC(),
+	}
+	svc.store.Set(record)
+	svc.usedIPs = map[string]struct{}{ipPeerTest: {}}
+
+	if svc.removePeerUnsafe(record) == nil {
+		t.Fatal("expected error from device, got nil")
+	}
+	if _, ok := svc.store.Get(peerIDTest); !ok {
+		t.Error("peer should remain in store when device removal fails")
+	}
+	if _, ok := svc.usedIPs[ipPeerTest]; !ok {
+		t.Error("IP should remain in usedIPs when device removal fails")
+	}
+}
+
+func TestEnsurePeerDuplicateRotates(t *testing.T) {
+	_, subnet4, _ := net.ParseCIDR(subnetSmallTestCIDR)
+	key, _ := wgtypes.GenerateKey()
+	svc := &WireGuardService{
+		client:     fakeWGClient{device: &wgtypes.Device{Peers: []wgtypes.Peer{{PublicKey: key, AllowedIPs: []net.IPNet{ipNet(t, ipPeerTest)}}}}},
+		deviceName: "wg0",
+		subnet4:    subnet4,
+		serverIP4:  net.ParseIP(ipServerTest),
+		store:      NewPeerStore(),
+	}
+	svc.store.Set(PeerRecord{
+		PeerID:       peerIDTest,
+		PublicKey:    key,
+		PresharedKey: wgtypes.Key{},
+		AllowedIPs:   []net.IPNet{ipNet(t, ipPeerTest)},
+		CreatedAt:    time.Now().UTC(),
+	})
+	info, err := svc.EnsurePeer(peerIDTest, nil, nil)
+	if err != nil {
+		t.Fatalf("EnsurePeer rotate: %v", err)
+	}
+	if info.PeerID != peerIDTest {
+		t.Errorf("PeerID: got %s", info.PeerID)
+	}
+	rec, ok := svc.store.Get(peerIDTest)
+	if !ok {
+		t.Fatal("peer should still be in store")
+	}
+	if rec.PublicKey == key {
+		t.Error("public key should have been rotated")
+	}
+}
