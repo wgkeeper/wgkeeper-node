@@ -273,8 +273,8 @@ func TestReconcileStoreWithSubnetsPeerInsideKept(t *testing.T) {
 		AllowedIPs:   mustParseCIDRs(t, testPeerIP4),
 	})
 
-	changed := svc.reconcileStoreWithSubnets()
-	if changed {
+	deleted := svc.reconcileStoreWithSubnets()
+	if len(deleted) != 0 {
 		t.Error("expected no change: peer is inside subnet")
 	}
 	if _, ok := svc.store.Get("inside-peer"); !ok {
@@ -299,9 +299,9 @@ func TestReconcileStoreWithSubnetsOutsidePeerRemoved(t *testing.T) {
 		AllowedIPs:   mustParseCIDRs(t, "192.168.1.5/32"),
 	})
 
-	changed := svc.reconcileStoreWithSubnets()
-	if !changed {
-		t.Error("expected changed=true: peer is outside subnet")
+	deleted := svc.reconcileStoreWithSubnets()
+	if len(deleted) == 0 {
+		t.Error("expected deletion: peer is outside subnet")
 	}
 	if _, ok := svc.store.Get(testOutsidePeerID); ok {
 		t.Error("peer should have been removed from store")
@@ -328,9 +328,9 @@ func TestReconcileStoreWithSubnetsDeviceErrorLogged(t *testing.T) {
 		AllowedIPs:   mustParseCIDRs(t, "192.168.1.5/32"),
 	})
 
-	changed := svc.reconcileStoreWithSubnets()
-	if changed {
-		t.Error("expected changed=false: store removal must be skipped when device removal fails")
+	deleted := svc.reconcileStoreWithSubnets()
+	if len(deleted) != 0 {
+		t.Error("expected no deletion: store removal must be skipped when device removal fails")
 	}
 	if _, ok := svc.store.Get(testOutsidePeerID); !ok {
 		t.Error("peer must remain in store when device removal fails to keep store and device in sync")

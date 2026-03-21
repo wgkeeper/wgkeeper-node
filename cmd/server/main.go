@@ -59,6 +59,11 @@ func main() {
 		slog.Error("init WireGuard", "error", err)
 		os.Exit(1)
 	}
+	defer func() {
+		if err := wgService.Close(); err != nil {
+			slog.Error("close peer store", "error", err)
+		}
+	}()
 
 	appCtx, appCancel := context.WithCancel(context.Background())
 	defer appCancel()

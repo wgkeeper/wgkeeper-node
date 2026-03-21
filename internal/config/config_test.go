@@ -388,7 +388,7 @@ wireguard:
   subnet: "10.0.0.0/24"
   server_ip: "10.0.0.1"
   listen_port: 51820
-  peer_store_file: "peers.json"
+  peer_store_file: "peers.db"
   routing:
     wan_interface: "eth0"
 `)
@@ -398,8 +398,8 @@ wireguard:
 	if err != nil {
 		t.Fatalf(msgExpectedNoError, err)
 	}
-	if cfg.PeerStoreFile != "peers.json" {
-		t.Fatalf("expected peer_store_file peers.json, got %q", cfg.PeerStoreFile)
+	if cfg.PeerStoreFile != "peers.db" {
+		t.Fatalf("expected peer_store_file peers.db, got %q", cfg.PeerStoreFile)
 	}
 }
 

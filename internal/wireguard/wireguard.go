@@ -205,7 +205,7 @@ func initPersistStore(svc *WireGuardService) error {
 	if err == nil && info.IsDir() {
 		return fmt.Errorf("wireguard.peer_store_file must not be a directory: %s", svc.persistPath)
 	}
-	if err := svc.store.LoadFromFileIfExists(svc.persistPath); err != nil {
+	if err := svc.store.OpenFileIfExists(svc.persistPath); err != nil {
 		return fmt.Errorf("load peer store: %w", err)
 	}
 	if err := svc.reconcileStoreWithDevice(); err != nil {
@@ -214,8 +214,8 @@ func initPersistStore(svc *WireGuardService) error {
 	// Remove expired peers synchronously so they are not visible on the device
 	// or in the store before the HTTP server starts accepting requests.
 	svc.cleanupExpiredPeers()
-	if svc.reconcileStoreWithSubnets() {
-		if err := svc.store.SaveToFile(svc.persistPath); err != nil {
+	if deleted := svc.reconcileStoreWithSubnets(); len(deleted) > 0 {
+		if err := svc.store.PersistDeleteBatch(deleted...); err != nil {
 			return fmt.Errorf("save peer store after reconcile: %w", err)
 		}
 	}
@@ -255,15 +255,15 @@ func (s *WireGuardService) reconcileStoreWithDevice() error {
 
 // reconcileStoreWithSubnets removes from store and from the device any record whose allowed_ips
 // are not entirely within the current config subnets (subnet4/subnet6).
-// Returns true if any record was removed.
-func (s *WireGuardService) reconcileStoreWithSubnets() bool {
+// Returns the peer IDs that were successfully removed.
+func (s *WireGuardService) reconcileStoreWithSubnets() []string {
 	var outOfSubnet []PeerRecord
 	s.store.ForEach(func(rec PeerRecord) {
 		if !s.recordAllowedIPsInSubnets(rec) {
 			outOfSubnet = append(outOfSubnet, rec)
 		}
 	})
-	var changed bool
+	var deleted []string
 	for _, rec := range outOfSubnet {
 		if err := s.configureDevice(wgtypes.Config{
 			Peers: []wgtypes.PeerConfig{{PublicKey: rec.PublicKey, Remove: true}},
@@ -275,9 +275,9 @@ func (s *WireGuardService) reconcileStoreWithSubnets() bool {
 			continue
 		}
 		s.store.Delete(rec.PeerID)
-		changed = true
+		deleted = append(deleted, rec.PeerID)
 	}
-	return changed
+	return deleted
 }
 
 func (s *WireGuardService) recordAllowedIPsInSubnets(rec PeerRecord) bool {
@@ -291,13 +291,9 @@ func (s *WireGuardService) recordAllowedIPsInSubnets(rec PeerRecord) bool {
 	return true
 }
 
-// savePersist writes the peer store to the persistence file if configured.
-// Returns an error if persistence is enabled and the write fails.
-func (s *WireGuardService) savePersist() error {
-	if s.persistPath == "" {
-		return nil
-	}
-	return s.store.SaveToFile(s.persistPath)
+// Close releases resources held by the service, including the peer store DB.
+func (s *WireGuardService) Close() error {
+	return s.store.Close()
 }
 
 // configureDevice wraps client.ConfigureDevice with a hard timeout so that a
@@ -431,21 +427,21 @@ func (s *WireGuardService) ValidateAddressFamilies(requested []string) ([]string
 }
 
 func (s *WireGuardService) EnsurePeer(peerID string, expiresAt *time.Time, addressFamilies []string) (PeerInfo, error) {
-	info, err := s.doEnsurePeer(peerID, expiresAt, addressFamilies)
+	// doEnsurePeer releases s.mu before returning, so PersistPut runs outside
+	// the lock and does not block concurrent store reads.
+	info, rec, err := s.doEnsurePeer(peerID, expiresAt, addressFamilies)
 	if err != nil {
 		return PeerInfo{}, err
 	}
-	// savePersist takes its own snapshot under store.mu; calling it outside s.mu
-	// lets concurrent reads proceed while disk I/O completes.
-	if err := s.savePersist(); err != nil {
+	if err := s.store.PersistPut(rec); err != nil {
 		return PeerInfo{}, fmt.Errorf(errSavePeerStoreFmt, err)
 	}
 	return info, nil
 }
 
 // doEnsurePeer performs all in-memory and device mutations under s.mu.
-// It does not call savePersist; the caller must persist after releasing the lock.
-func (s *WireGuardService) doEnsurePeer(peerID string, expiresAt *time.Time, addressFamilies []string) (PeerInfo, error) {
+// It does not persist; the caller must call PersistPut after releasing the lock.
+func (s *WireGuardService) doEnsurePeer(peerID string, expiresAt *time.Time, addressFamilies []string) (PeerInfo, PeerRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -455,23 +451,23 @@ func (s *WireGuardService) doEnsurePeer(peerID string, expiresAt *time.Time, add
 
 	families, err := s.ValidateAddressFamilies(addressFamilies)
 	if err != nil {
-		return PeerInfo{}, err
+		return PeerInfo{}, PeerRecord{}, err
 	}
 
 	allowedIPs, err := s.allocateIPs(families)
 	if err != nil {
-		return PeerInfo{}, err
+		return PeerInfo{}, PeerRecord{}, err
 	}
 
 	privateKey, err := wgtypes.GeneratePrivateKey()
 	if err != nil {
-		return PeerInfo{}, err
+		return PeerInfo{}, PeerRecord{}, err
 	}
 
 	publicKey := privateKey.PublicKey()
 	presharedKey, err := wgtypes.GenerateKey()
 	if err != nil {
-		return PeerInfo{}, err
+		return PeerInfo{}, PeerRecord{}, err
 	}
 	peerConfig := wgtypes.PeerConfig{
 		PublicKey:                   publicKey,
@@ -485,17 +481,18 @@ func (s *WireGuardService) doEnsurePeer(peerID string, expiresAt *time.Time, add
 		for _, aip := range allowedIPs {
 			delete(s.usedIPs, aip.IP.String())
 		}
-		return PeerInfo{}, err
+		return PeerInfo{}, PeerRecord{}, err
 	}
 
-	s.store.Set(PeerRecord{
+	rec := PeerRecord{
 		PeerID:       peerID,
 		PublicKey:    publicKey,
 		PresharedKey: presharedKey,
 		AllowedIPs:   allowedIPs,
 		CreatedAt:    time.Now().UTC(),
 		ExpiresAt:    expiresAt,
-	})
+	}
+	s.store.Set(rec)
 
 	allowedIPsStr := make([]string, len(allowedIPs))
 	for i := range allowedIPs {
@@ -508,7 +505,7 @@ func (s *WireGuardService) doEnsurePeer(peerID string, expiresAt *time.Time, add
 		PresharedKey:    presharedKey.String(),
 		AllowedIPs:      allowedIPsStr,
 		AddressFamilies: families,
-	}, nil
+	}, rec, nil
 }
 
 func (s *WireGuardService) ServerInfo() (string, int, error) {
@@ -523,8 +520,7 @@ func (s *WireGuardService) DeletePeer(peerID string) error {
 	if err := s.doDeletePeer(peerID); err != nil {
 		return err
 	}
-	// savePersist outside s.mu so concurrent reads are not blocked during disk I/O.
-	if err := s.savePersist(); err != nil {
+	if err := s.store.PersistDeleteBatch(peerID); err != nil {
 		return fmt.Errorf(errSavePeerStoreFmt, err)
 	}
 	return nil
@@ -567,7 +563,7 @@ func (s *WireGuardService) retractAllocHint(ip net.IP) {
 }
 
 // doDeletePeer performs all in-memory and device mutations under s.mu.
-// It does not call savePersist; the caller must persist after releasing the lock.
+// It does not persist; the caller must call PersistDeleteBatch after releasing the lock.
 func (s *WireGuardService) doDeletePeer(peerID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -727,16 +723,16 @@ func appendIfNotPresent(slice []string, v string) []string {
 	return append(slice, v)
 }
 
-func (s *WireGuardService) rotatePeer(peerID string, record PeerRecord, expiresAt *time.Time) (PeerInfo, error) {
+func (s *WireGuardService) rotatePeer(peerID string, record PeerRecord, expiresAt *time.Time) (PeerInfo, PeerRecord, error) {
 	privateKey, err := wgtypes.GeneratePrivateKey()
 	if err != nil {
-		return PeerInfo{}, err
+		return PeerInfo{}, PeerRecord{}, err
 	}
 
 	publicKey := privateKey.PublicKey()
 	presharedKey, err := wgtypes.GenerateKey()
 	if err != nil {
-		return PeerInfo{}, err
+		return PeerInfo{}, PeerRecord{}, err
 	}
 	config := wgtypes.Config{
 		Peers: []wgtypes.PeerConfig{
@@ -755,23 +751,24 @@ func (s *WireGuardService) rotatePeer(peerID string, record PeerRecord, expiresA
 	}
 
 	if err := s.configureDevice(config); err != nil {
-		return PeerInfo{}, err
+		return PeerInfo{}, PeerRecord{}, err
 	}
 
-	// Use new expiresAt if provided, otherwise keep existing
+	// Use new expiresAt if provided, otherwise keep existing.
 	effectiveExpiresAt := expiresAt
 	if effectiveExpiresAt == nil {
 		effectiveExpiresAt = record.ExpiresAt
 	}
-	s.store.Set(PeerRecord{
+	newRec := PeerRecord{
 		PeerID:       peerID,
 		PublicKey:    publicKey,
 		PresharedKey: presharedKey,
 		AllowedIPs:   record.AllowedIPs,
 		CreatedAt:    record.CreatedAt,
 		ExpiresAt:    effectiveExpiresAt,
-	})
-	// savePersist is intentionally omitted here; EnsurePeer calls it after
+	}
+	s.store.Set(newRec)
+	// PersistPut is intentionally omitted here; EnsurePeer calls it after
 	// releasing s.mu so disk I/O does not block concurrent store reads.
 
 	allowedIPsStr := make([]string, len(record.AllowedIPs))
@@ -791,7 +788,7 @@ func (s *WireGuardService) rotatePeer(peerID string, record PeerRecord, expiresA
 		PresharedKey:    presharedKey.String(),
 		AllowedIPs:      allowedIPsStr,
 		AddressFamilies: peerFamilies,
-	}, nil
+	}, newRec, nil
 }
 
 // initUsedIPs builds the usedIPs cache from the current store and server IPs.

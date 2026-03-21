@@ -17,7 +17,7 @@ const (
 	msgUnexpectedError     = "unexpected error: %v"
 	msgListPeersFmt        = "ListPeers: %v"
 	msgSavePeerStoreErr    = "expected 'save peer store' in error, got %v"
-	persistPathNonexistent = "/nonexistent-dir-xyz/peers.json"
+	persistPathNonexistent = "/nonexistent-dir-xyz/peers.db"
 	savePeerStoreSubstr    = "save peer store"
 	ipServerTest           = "10.0.0.1"
 	ipPeerTest             = "10.0.0.2"
@@ -454,22 +454,35 @@ func ipNet6(t *testing.T, ip string) net.IPNet {
 	return *n
 }
 
-func TestSavePersist(t *testing.T) {
+func TestStoreOpenFileCreatesFile(t *testing.T) {
 	dir := t.TempDir()
-	path := dir + "/peers.json"
-	svc := &WireGuardService{store: NewPeerStore(), persistPath: path}
-	if err := svc.savePersist(); err != nil {
-		t.Fatalf("savePersist: %v", err)
+	path := dir + "/peers.db"
+	store := NewPeerStore()
+	if err := store.OpenFile(path); err != nil {
+		t.Fatalf("OpenFile: %v", err)
 	}
+	defer store.Close()
 	if _, err := os.Stat(path); err != nil {
-		t.Errorf("file should exist: %v", err)
+		t.Errorf("file should exist after OpenFile: %v", err)
 	}
 }
 
-func TestSavePersistNoPath(t *testing.T) {
-	svc := &WireGuardService{store: NewPeerStore(), persistPath: ""}
-	if err := svc.savePersist(); err != nil {
-		t.Fatalf("savePersist with empty path: %v", err)
+func TestPersistPutNoopWhenNoDB(t *testing.T) {
+	store := NewPeerStore()
+	key, _ := wgtypes.GenerateKey()
+	psk, _ := wgtypes.GenerateKey()
+	rec := PeerRecord{
+		PeerID:       peerIDTest,
+		PublicKey:    key,
+		PresharedKey: psk,
+		AllowedIPs:   []net.IPNet{ipNet(t, ipPeerTest)},
+		CreatedAt:    time.Now().UTC(),
+	}
+	if err := store.PersistPut(rec); err != nil {
+		t.Fatalf("PersistPut with no DB open: expected nil, got %v", err)
+	}
+	if err := store.PersistDeleteBatch(peerIDTest); err != nil {
+		t.Fatalf("PersistDeleteBatch with no DB open: expected nil, got %v", err)
 	}
 }
 
@@ -529,19 +542,33 @@ func TestRunCleanupSafePanicRecovery(t *testing.T) {
 	svc.runCleanupSafe()
 }
 
+// openAndBreakDB opens the store DB at path, then closes the underlying bolt.DB
+// directly (without calling store.Close) so that store.db is non-nil but closed.
+// Subsequent PersistPut/PersistDeleteBatch calls will return an error.
+func openAndBreakDB(t *testing.T, store *PeerStore, path string) {
+	t.Helper()
+	if err := store.OpenFile(path); err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	// Close the bbolt DB directly, leaving store.db non-nil so persist methods
+	// attempt the write and return the "database not open" error.
+	_ = store.db.Close()
+}
+
 func TestEnsurePeerNewPeerSavePersistError(t *testing.T) {
+	dir := t.TempDir()
 	_, subnet4, _ := net.ParseCIDR(subnetTestCIDR)
 	svc := &WireGuardService{
-		client:      fakeWGClient{device: &wgtypes.Device{}},
-		deviceName:  "wg0",
-		subnet4:     subnet4,
-		serverIP4:   net.ParseIP(ipServerTest),
-		store:       NewPeerStore(),
-		persistPath: persistPathNonexistent,
+		client:     fakeWGClient{device: &wgtypes.Device{}},
+		deviceName: "wg0",
+		subnet4:    subnet4,
+		serverIP4:  net.ParseIP(ipServerTest),
+		store:      NewPeerStore(),
 	}
+	openAndBreakDB(t, svc.store, dir+"/peers.db")
 	_, err := svc.EnsurePeer(peerIDNewPeer, nil, nil)
 	if err == nil {
-		t.Fatal("expected error when savePersist fails for new peer")
+		t.Fatal("expected error when persist fails for new peer")
 	}
 	if !strings.Contains(err.Error(), savePeerStoreSubstr) {
 		t.Errorf(msgSavePeerStoreErr, err)
@@ -549,16 +576,18 @@ func TestEnsurePeerNewPeerSavePersistError(t *testing.T) {
 }
 
 func TestDeletePeerSavePersistError(t *testing.T) {
+	dir := t.TempDir()
 	_, subnet4, _ := net.ParseCIDR(subnetTestCIDR)
 	key, _ := wgtypes.GenerateKey()
 	svc := &WireGuardService{
-		client:      fakeWGClient{},
-		deviceName:  "wg0",
-		subnet4:     subnet4,
-		serverIP4:   net.ParseIP(ipServerTest),
-		store:       NewPeerStore(),
-		persistPath: persistPathNonexistent,
+		client:     fakeWGClient{},
+		deviceName: "wg0",
+		subnet4:    subnet4,
+		serverIP4:  net.ParseIP(ipServerTest),
+		store:      NewPeerStore(),
 	}
+	// Open and break DB first; then set peer so it's in memory for DeletePeer.
+	openAndBreakDB(t, svc.store, dir+"/peers.db")
 	svc.store.Set(PeerRecord{
 		PeerID:       peerIDTest,
 		PublicKey:    key,
@@ -567,7 +596,7 @@ func TestDeletePeerSavePersistError(t *testing.T) {
 	})
 	err := svc.DeletePeer(peerIDTest)
 	if err == nil {
-		t.Fatal("expected error when savePersist fails after delete")
+		t.Fatal("expected error when persist fails after delete")
 	}
 	if !strings.Contains(err.Error(), savePeerStoreSubstr) {
 		t.Errorf(msgSavePeerStoreErr, err)
@@ -575,16 +604,19 @@ func TestDeletePeerSavePersistError(t *testing.T) {
 }
 
 func TestEnsurePeerRotateSavePersistError(t *testing.T) {
+	dir := t.TempDir()
 	_, subnet4, _ := net.ParseCIDR(subnetTestCIDR)
 	key, _ := wgtypes.GenerateKey()
 	svc := &WireGuardService{
-		client:      fakeWGClient{device: &wgtypes.Device{}},
-		deviceName:  "wg0",
-		subnet4:     subnet4,
-		serverIP4:   net.ParseIP(ipServerTest),
-		store:       NewPeerStore(),
-		persistPath: persistPathNonexistent,
+		client:     fakeWGClient{device: &wgtypes.Device{}},
+		deviceName: "wg0",
+		subnet4:    subnet4,
+		serverIP4:  net.ParseIP(ipServerTest),
+		store:      NewPeerStore(),
+		usedIPs:    make(map[string]struct{}),
 	}
+	// Open and break DB first; then set peer so it's in memory for rotate path.
+	openAndBreakDB(t, svc.store, dir+"/peers.db")
 	svc.store.Set(PeerRecord{
 		PeerID:       peerIDTest,
 		PublicKey:    key,
@@ -594,7 +626,7 @@ func TestEnsurePeerRotateSavePersistError(t *testing.T) {
 	})
 	_, err := svc.EnsurePeer(peerIDTest, nil, nil)
 	if err == nil {
-		t.Fatal("expected error when savePersist fails during rotation")
+		t.Fatal("expected error when persist fails during rotation")
 	}
 	if !strings.Contains(err.Error(), savePeerStoreSubstr) {
 		t.Errorf(msgSavePeerStoreErr, err)

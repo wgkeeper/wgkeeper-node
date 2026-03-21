@@ -1,6 +1,7 @@
 package wireguard
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -10,12 +11,13 @@ import (
 	"testing"
 	"time"
 
+	bolt "go.etcd.io/bbolt"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
 const (
 	testAllowedIP  = "10.0.0.1/32"
-	testPeersFile  = "peers.json"
+	testPeersFile  = "peers.db"
 	testPeerIDSort = "peer-a"
 )
 
@@ -65,66 +67,80 @@ func TestStoredToRecordAllowedIPs(t *testing.T) {
 func TestSaveToFileAndLoadFromFileRoundtrip(t *testing.T) {
 	key, _ := wgtypes.GenerateKey()
 	psk, _ := wgtypes.GenerateKey()
-	store := NewPeerStore()
-	store.Set(PeerRecord{
+	rec := PeerRecord{
 		PeerID:       "roundtrip",
 		PublicKey:    key,
 		PresharedKey: psk,
 		AllowedIPs:   mustParseCIDRs(t, testAllowedIP, "fd00::1/128"),
 		CreatedAt:    time.Now().UTC(),
 		ExpiresAt:    nil,
-	})
+	}
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, testPeersFile)
-	if err := store.SaveToFile(path); err != nil {
-		t.Fatalf("SaveToFile: %v", err)
+
+	store := NewPeerStore()
+	if err := store.OpenFile(path); err != nil {
+		t.Fatalf("OpenFile: %v", err)
 	}
+	store.Set(rec)
+	if err := store.PersistPut(rec); err != nil {
+		t.Fatalf("PersistPut: %v", err)
+	}
+	store.Close()
 
 	store2 := NewPeerStore()
-	if err := store2.LoadFromFile(path); err != nil {
-		t.Fatalf("LoadFromFile: %v", err)
+	if err := store2.OpenFile(path); err != nil {
+		t.Fatalf("OpenFile (reload): %v", err)
 	}
-	rec, ok := store2.Get("roundtrip")
+	defer store2.Close()
+	got, ok := store2.Get("roundtrip")
 	if !ok {
 		t.Fatalf("expected record after roundtrip")
 	}
-	if rec.PublicKey != key {
+	if got.PublicKey != key {
 		t.Fatalf("public_key changed after roundtrip")
 	}
-	if len(rec.AllowedIPs) != 2 {
-		t.Fatalf("expected 2 allowed_ips, got %d", len(rec.AllowedIPs))
+	if len(got.AllowedIPs) != 2 {
+		t.Fatalf("expected 2 allowed_ips, got %d", len(got.AllowedIPs))
 	}
 }
 
 func TestSaveToFileAndLoadFromFileRoundtripWithPresharedKey(t *testing.T) {
 	key, _ := wgtypes.GenerateKey()
 	psk, _ := wgtypes.GenerateKey()
-	store := NewPeerStore()
-	store.Set(PeerRecord{
+	rec := PeerRecord{
 		PeerID:       "roundtrip-psk",
 		PublicKey:    key,
 		PresharedKey: psk,
 		AllowedIPs:   mustParseCIDRs(t, "10.0.0.2/32"),
 		CreatedAt:    time.Now().UTC(),
 		ExpiresAt:    nil,
-	})
+	}
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, testPeersFile)
-	if err := store.SaveToFile(path); err != nil {
-		t.Fatalf("SaveToFile: %v", err)
+
+	store := NewPeerStore()
+	if err := store.OpenFile(path); err != nil {
+		t.Fatalf("OpenFile: %v", err)
 	}
+	store.Set(rec)
+	if err := store.PersistPut(rec); err != nil {
+		t.Fatalf("PersistPut: %v", err)
+	}
+	store.Close()
 
 	store2 := NewPeerStore()
-	if err := store2.LoadFromFile(path); err != nil {
-		t.Fatalf("LoadFromFile: %v", err)
+	if err := store2.OpenFile(path); err != nil {
+		t.Fatalf("OpenFile (reload): %v", err)
 	}
-	rec, ok := store2.Get("roundtrip-psk")
+	defer store2.Close()
+	got, ok := store2.Get("roundtrip-psk")
 	if !ok {
 		t.Fatalf("expected record after roundtrip")
 	}
-	if rec.PresharedKey != psk {
+	if got.PresharedKey != psk {
 		t.Fatalf("preshared_key not preserved after roundtrip")
 	}
 }
@@ -144,9 +160,9 @@ func mustParseCIDRs(t *testing.T, cidrs ...string) []net.IPNet {
 
 func TestLoadFromFileIfExistsMissingFile(t *testing.T) {
 	store := NewPeerStore()
-	path := filepath.Join(t.TempDir(), "nonexistent.json")
-	if err := store.LoadFromFileIfExists(path); err != nil {
-		t.Fatalf("LoadFromFileIfExists(missing): expected nil, got %v", err)
+	path := filepath.Join(t.TempDir(), "nonexistent.db")
+	if err := store.OpenFileIfExists(path); err != nil {
+		t.Fatalf("OpenFileIfExists(missing): expected nil, got %v", err)
 	}
 	if len(store.List()) != 0 {
 		t.Fatalf("expected empty store after missing file, got %d", len(store.List()))
@@ -160,9 +176,10 @@ func TestLoadFromFileIfExistsEmptyFile(t *testing.T) {
 		t.Fatalf("write empty file: %v", err)
 	}
 	store := NewPeerStore()
-	if store.LoadFromFileIfExists(path) == nil {
-		t.Fatal("LoadFromFileIfExists(empty file): expected error, got nil")
+	if err := store.OpenFileIfExists(path); err != nil {
+		t.Fatalf("OpenFileIfExists(empty file): expected nil, got %v", err)
 	}
+	defer store.Close()
 }
 
 func TestStoredToRecordEmptyPeerID(t *testing.T) {
@@ -197,14 +214,15 @@ func TestStoredToRecordEmptyAllowedIPs(t *testing.T) {
 	}
 }
 
-func TestLoadFromDataNullRoot(t *testing.T) {
-	store := NewPeerStore()
-	err := store.loadFromData([]byte("null"))
-	if err == nil {
-		t.Fatal("loadFromData(null): expected error, got nil")
+func TestLoadFromFileInvalidDB(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, testPeersFile)
+	if err := os.WriteFile(path, []byte("not-a-bbolt-db"), 0o600); err != nil {
+		t.Fatalf("write invalid db: %v", err)
 	}
-	if !strings.Contains(err.Error(), "must be a JSON array") {
-		t.Errorf("expected error about JSON array, got: %v", err)
+	store := NewPeerStore()
+	if err := store.OpenFile(path); err == nil {
+		t.Fatal("expected error for invalid bbolt file")
 	}
 }
 
@@ -291,21 +309,9 @@ func TestStoredToRecordAllCIDRsEmpty(t *testing.T) {
 
 func TestLoadFromFileReadError(t *testing.T) {
 	store := NewPeerStore()
-	err := store.LoadFromFile("/nonexistent-dir/peers.json")
+	err := store.OpenFile("/nonexistent-dir/peers.db")
 	if err == nil {
 		t.Fatal("expected error for unreadable file")
-	}
-}
-
-func TestLoadFromFileInvalidJSON(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, testPeersFile)
-	if err := os.WriteFile(path, []byte("{not valid json"), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	store := NewPeerStore()
-	if store.LoadFromFile(path) == nil {
-		t.Fatal("expected error for invalid JSON")
 	}
 }
 
@@ -331,9 +337,9 @@ func TestPeerStoreConcurrentAccess(t *testing.T) {
 
 func TestSaveToFileUnwritablePath(t *testing.T) {
 	store := NewPeerStore()
-	err := store.SaveToFile("/nonexistent-dir-xyz/peers.json")
+	err := store.OpenFile("/nonexistent-dir-xyz/peers.db")
 	if err == nil {
-		t.Fatal("expected error when saving to unwritable path")
+		t.Fatal("expected error when opening unwritable path")
 	}
 }
 
@@ -343,28 +349,59 @@ func TestLoadFromFileIfExistsPermissionError(t *testing.T) {
 	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, testPeersFile)
-	if err := os.WriteFile(path, []byte(`[]`), 0o000); err != nil {
+	if err := os.WriteFile(path, []byte(""), 0o000); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	store := NewPeerStore()
-	if store.LoadFromFileIfExists(path) == nil {
+	if store.OpenFileIfExists(path) == nil {
 		t.Fatal("expected error for permission-denied file (non-ErrNotExist)")
 	}
 }
 
-func TestLoadFromDataDuplicatePublicKey(t *testing.T) {
+func TestLoadFromFileDuplicatePublicKey(t *testing.T) {
 	key, _ := wgtypes.GenerateKey()
 	psk, _ := wgtypes.GenerateKey()
-	keyStr := key.String()
-	pskStr := psk.String()
-	data := []byte(fmt.Sprintf(`[
-		{"peer_id":"a","public_key":%q,"preshared_key":%q,"allowed_ips":[%q],"created_at":"2024-01-01T00:00:00Z"},
-		{"peer_id":"b","public_key":%q,"preshared_key":%q,"allowed_ips":["10.0.0.2/32"],"created_at":"2024-01-01T00:00:00Z"}
-	]`, keyStr, pskStr, testAllowedIP, keyStr, pskStr))
+	dir := t.TempDir()
+	path := filepath.Join(dir, testPeersFile)
+	db, err := bolt.Open(path, 0o600, nil)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	err = db.Update(func(tx *bolt.Tx) error {
+		b, err := tx.CreateBucket(peersBucket)
+		if err != nil {
+			return err
+		}
+		ra := recordToStored(PeerRecord{
+			PeerID:       "a",
+			PublicKey:    key,
+			PresharedKey: psk,
+			AllowedIPs:   mustParseCIDRs(t, testAllowedIP),
+			CreatedAt:    time.Now().UTC(),
+		})
+		rb := recordToStored(PeerRecord{
+			PeerID:       "b",
+			PublicKey:    key,
+			PresharedKey: psk,
+			AllowedIPs:   mustParseCIDRs(t, "10.0.0.2/32"),
+			CreatedAt:    time.Now().UTC(),
+		})
+		ba, _ := json.Marshal(ra)
+		bb, _ := json.Marshal(rb)
+		if err := b.Put([]byte("a"), ba); err != nil {
+			return err
+		}
+		return b.Put([]byte("b"), bb)
+	})
+	if err != nil {
+		t.Fatalf("prepare db: %v", err)
+	}
+	_ = db.Close()
+
 	store := NewPeerStore()
-	err := store.loadFromData(data)
+	err = store.OpenFile(path)
 	if err == nil {
-		t.Fatal("loadFromData(duplicate public_key): expected error, got nil")
+		t.Fatal("OpenFile(duplicate public_key): expected error, got nil")
 	}
 	if !strings.Contains(err.Error(), "duplicate public_key") {
 		t.Errorf("expected error about duplicate public_key, got: %v", err)
@@ -520,22 +557,55 @@ func TestListPaginatedSortedOrderSameCreatedAt(t *testing.T) {
 	}
 }
 
-// TestLoadFromDataRebuildsSortedIndex verifies that loadFromData rebuilds the
+// TestLoadFromFileRebuildsSortedIndex verifies that load from DB rebuilds the
 // sorted index correctly so ListPaginated works after loading from file.
-func TestLoadFromDataRebuildsSortedIndex(t *testing.T) {
+func TestLoadFromFileRebuildsSortedIndex(t *testing.T) {
 	key1, _ := wgtypes.GenerateKey()
 	key2, _ := wgtypes.GenerateKey()
 	psk1, _ := wgtypes.GenerateKey()
 	psk2, _ := wgtypes.GenerateKey()
-	data := []byte(fmt.Sprintf(`[
-		{"peer_id":"b","public_key":%q,"preshared_key":%q,"allowed_ips":["10.0.0.2/32"],"created_at":"2024-01-02T00:00:00Z"},
-		{"peer_id":"a","public_key":%q,"preshared_key":%q,"allowed_ips":["10.0.0.1/32"],"created_at":"2024-01-01T00:00:00Z"}
-	]`, key1.String(), psk1.String(), key2.String(), psk2.String()))
+	dir := t.TempDir()
+	path := filepath.Join(dir, testPeersFile)
+	db, err := bolt.Open(path, 0o600, nil)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	err = db.Update(func(tx *bolt.Tx) error {
+		b, err := tx.CreateBucket(peersBucket)
+		if err != nil {
+			return err
+		}
+		rb := recordToStored(PeerRecord{
+			PeerID:       "b",
+			PublicKey:    key1,
+			PresharedKey: psk1,
+			AllowedIPs:   mustParseCIDRs(t, "10.0.0.2/32"),
+			CreatedAt:    mustTime("2024-01-02T00:00:00Z"),
+		})
+		ra := recordToStored(PeerRecord{
+			PeerID:       "a",
+			PublicKey:    key2,
+			PresharedKey: psk2,
+			AllowedIPs:   mustParseCIDRs(t, "10.0.0.1/32"),
+			CreatedAt:    mustTime("2024-01-01T00:00:00Z"),
+		})
+		bb, _ := json.Marshal(rb)
+		ba, _ := json.Marshal(ra)
+		if err := b.Put([]byte("b"), bb); err != nil {
+			return err
+		}
+		return b.Put([]byte("a"), ba)
+	})
+	if err != nil {
+		t.Fatalf("prepare db: %v", err)
+	}
+	_ = db.Close()
 
 	store := NewPeerStore()
-	if err := store.loadFromData(data); err != nil {
-		t.Fatalf("loadFromData: %v", err)
+	if err := store.OpenFile(path); err != nil {
+		t.Fatalf("OpenFile: %v", err)
 	}
+	defer store.Close()
 	records, total := store.ListPaginated(0, 10)
 	if total != 2 {
 		t.Fatalf("expected 2 records, got %d", total)
@@ -544,4 +614,12 @@ func TestLoadFromDataRebuildsSortedIndex(t *testing.T) {
 	if records[0].PeerID != "a" || records[1].PeerID != "b" {
 		t.Errorf("expected [a b], got [%s %s]", records[0].PeerID, records[1].PeerID)
 	}
+}
+
+func mustTime(ts string) time.Time {
+	t, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		panic(err)
+	}
+	return t
 }

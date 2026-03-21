@@ -154,7 +154,7 @@ NODE_CONFIG=/path/to/config.yaml
 | `wireguard.subnet6` | IPv6 CIDR for peer IP allocation (max prefix `/126`); optional when `subnet` is set |
 | `wireguard.server_ip6` | Optional IPv6 address for the server within the subnet |
 | `wireguard.routing.wan_interface` | WAN interface used for NAT rules (e.g. `eth0`); only letters, digits, `-`, `_`, `.` are accepted |
-| `wireguard.peer_store_file` | Optional path to a JSON file for persistent peer storage |
+| `wireguard.peer_store_file` | Optional path to a bbolt DB file for persistent peer storage |
 
 ## Deployment
 
@@ -371,20 +371,20 @@ curl -X DELETE http://localhost:51821/peers/7c2f3f7a-6b4e-4f3f-8b2a-1a9b3c2d4e5f
 
 ## Peer store persistence
 
-By default, peer state is in-memory only and is lost on restart. Enable persistence by setting `wireguard.peer_store_file` to a writable path (e.g. `/var/lib/wgkeeper/peers.json`).
+By default, peer state is in-memory only and is lost on restart. Enable persistence by setting `wireguard.peer_store_file` to a writable path (e.g. `/var/lib/wgkeeper/peers.db`).
 
 **Lifecycle:**
 
 | Event | Behaviour |
 |-------|-----------|
 | Startup — file missing | Start with an empty store |
-| Startup — invalid JSON or duplicate `peer_id` | Startup fails with a clear error |
+| Startup — invalid/corrupted DB data or duplicate `peer_id`/`public_key` | Startup fails with a clear error |
 | Startup — file valid | Restore all peers to the WireGuard device; remove any peers outside the current subnets |
 | Peer created / rotated / deleted | Store is written atomically (temp file + rename) |
 | Host reboot, interface recreated | Load file; re-add all stored peers to the device |
 | Subnet changed in config | On next startup, peers outside the new subnets are removed from the store and device |
 
-**File format:** JSON array. Each entry contains `peer_id`, `public_key`, `preshared_key`, `allowed_ips`, `created_at`, and optional `expires_at`. Private keys are never stored. The file is written with mode `0600` — create its directory with tight permissions.
+**Storage format:** bbolt database file with peer records keyed by `peer_id` and containing `public_key`, `preshared_key`, `allowed_ips`, `created_at`, and optional `expires_at`. Private keys are never stored. The DB file is created with mode `0600` — create its directory with tight permissions.
 
 ## Trademark
 

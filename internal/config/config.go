@@ -33,7 +33,7 @@ type Config struct {
 	WGServerIP6   string // IPv6 server address (optional)
 	WGListenPort  int
 	WANInterface  string
-	PeerStoreFile string // optional: path to JSON file for persistent peer store; empty = in-memory only
+	PeerStoreFile string // optional: path to bbolt DB file for persistent peer store; empty = in-memory only
 }
 
 type wireguardRouting struct {

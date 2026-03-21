@@ -58,7 +58,7 @@ func (s *WireGuardService) cleanupExpiredPeers() {
 	if len(deleted) == 0 {
 		return
 	}
-	if err := s.savePersist(); err != nil {
+	if err := s.store.PersistDeleteBatch(deleted...); err != nil {
 		slog.Error("cleanup: save peer store", "error", err)
 	}
 	for _, peerID := range deleted {
