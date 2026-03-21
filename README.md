@@ -8,12 +8,13 @@
 
 <p align="center">
   <a href="https://github.com/wgkeeper/wgkeeper-node/actions/workflows/ci.yml"><img src="https://github.com/wgkeeper/wgkeeper-node/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" /></a>
-  <a href="https://github.com/wgkeeper/wgkeeper-node/blob/main/LICENSE"><img src="https://img.shields.io/github/license/wgkeeper/wgkeeper-node" alt="License" /></a>
+  <a href="https://github.com/wgkeeper/wgkeeper-node/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-AGPL_v3-blue.svg" alt="License" /></a>
   <a href="https://github.com/wgkeeper/wgkeeper-node/releases/latest"><img src="https://img.shields.io/github/v/release/wgkeeper/wgkeeper-node" alt="GitHub Release" /></a>
   <a href="https://github.com/wgkeeper/wgkeeper-node/pkgs/container/node"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fghcr-badge.elias.eu.org%2Fapi%2Fwgkeeper%2Fwgkeeper-node%2Fnode&query=%24.downloadCount&label=image%20pulls&color=blue" alt="Image Pulls" /></a>
   <a href="https://codecov.io/gh/wgkeeper/wgkeeper-node"><img src="https://codecov.io/gh/wgkeeper/wgkeeper-node/graph/badge.svg" alt="codecov" /></a>
   <a href="https://goreportcard.com/report/github.com/wgkeeper/wgkeeper-node"><img src="https://goreportcard.com/badge/github.com/wgkeeper/wgkeeper-node" alt="Go Report Card" /></a>
-  <a href="https://github.com/wgkeeper/wgkeeper-node"><img src="https://img.shields.io/github/go-mod/go-version/wgkeeper/wgkeeper-node" alt="Go" /></a>
+  <a href="https://pkg.go.dev/github.com/wgkeeper/wgkeeper-node"><img src="https://pkg.go.dev/badge/github.com/wgkeeper/wgkeeper-node.svg" alt="Go Reference" /></a>
+  <a href="https://github.com/wgkeeper/wgkeeper-node/blob/main/go.mod"><img src="https://img.shields.io/github/go-mod/go-version/wgkeeper/wgkeeper-node" alt="Go" /></a>
 </p>
 
 ---
