@@ -27,8 +27,6 @@ WGKeeper Node runs a WireGuard interface on a Linux host and exposes a **REST AP
 
 ## Table of contents
 
-- [Why this project](#why-this-project)
-- [Features](#features)
 - [Architecture](#architecture)
 - [Security](#security)
 - [Requirements](#requirements)
@@ -41,24 +39,10 @@ WGKeeper Node runs a WireGuard interface on a Linux host and exposes a **REST AP
 - [Performance benchmarks](#performance-benchmarks)
 - [API reference](#api-reference)
 - [Peer store persistence](#peer-store-persistence)
+- [Testing](#testing)
 - [Trademark](#trademark)
 
 ---
-
-## Why this project
-
-Managing WireGuard at scale means coordinating dozens or hundreds of nodes: adding and removing peers, rotating keys, tracking expiry, and staying consistent after reboots — all without manual `wg` commands on each machine.
-
-WGKeeper Node is the agent that runs on every host. It exposes a single, consistent REST API so a central orchestrator can manage any node identically — regardless of how many there are. Each node stays **lean and security-focused**: small surface area, strict API key auth, post-quantum preshared keys per peer, and no dependency on any external service.
-
-## Features
-
-| Area | Capabilities |
-|------|--------------|
-| **Orchestration** | Central API layer to manage many nodes; automatic IP allocation and key rotation |
-| **Security** | API key auth, optional IP allowlists, rate limiting, TLS, security headers, request ID for tracing |
-| **Resilience** | Post-quantum preshared keys per peer; optional file-based peer store persistence |
-| **Observability** | WireGuard stats, peer activity, auto-generated client configs |
 
 ## Architecture
 
@@ -80,7 +64,7 @@ flowchart LR
 | Mechanism | Details |
 |-----------|---------|
 | **API key auth** | All protected endpoints require `X-API-Key`; `/healthz` and `/readyz` are public |
-| **IP allowlist** | `server.allowed_ips` — when set, only listed IPs/CIDRs can reach protected routes |
+| **IP allowlist** | `server.allowed_ips` — optional; when configured, acts as an independent layer on top of API key auth so a request must pass both checks |
 | **Trusted proxies** | Only `127.0.0.1` and `::1` are trusted as reverse proxies, preventing `X-Forwarded-For` spoofing from external clients |
 | **Rate limiting** | 20 req/s per client IP, burst 30; automatically disabled when an allowlist is configured |
 | **Body limit** | 256 KB maximum; larger requests get `413 Request Entity Too Large` |
@@ -116,13 +100,7 @@ flowchart LR
    ```
    API: `http://localhost:51821` · WireGuard UDP: `51820`
 
-4. **Create a peer**
-   ```bash
-   curl -X POST http://localhost:51821/peers \
-     -H "X-API-Key: YOUR_API_KEY" \
-     -H "Content-Type: application/json" \
-     -d '{"peerId":"7c2f3f7a-6b4e-4f3f-8b2a-1a9b3c2d4e5f"}'
-   ```
+4. **Create a peer** — see [API reference](#api-reference)
 
 ## Configuration
 
@@ -261,30 +239,13 @@ All protected endpoints require the `X-API-Key` header. Every response includes 
 
 ### GET /stats
 
-```bash
-curl http://localhost:51821/stats -H "X-API-Key: <your-api-key>"
-```
-
-```json
-{
-  "service": { "name": "wgkeeper-node", "version": "1.0.0" },
-  "wireguard": {
-    "interface": "wg0",
-    "listenPort": 51820,
-    "subnets": ["10.0.0.0/24", "fd00::/112"],
-    "serverIps": ["10.0.0.1", "fd00::1"],
-    "addressFamilies": ["IPv4", "IPv6"]
-  },
-  "peers": { "possible": 253, "issued": 0, "active": 0 },
-  "startedAt": "2026-02-02T00:06:06Z"
-}
-```
+Returns service metadata and WireGuard interface statistics: interface name, listen port, configured subnets, server IPs, address families, and peer counts (possible, issued, active).
 
 ---
 
 ### GET /peers
 
-Returns a paginated list of peers.
+Returns a paginated list of peers. Each item includes `peerId`, `publicKey`, `allowedIPs`, `addressFamilies`, `active`, `lastHandshakeAt`, `createdAt`, and `expiresAt`.
 
 **Query params:**
 
@@ -295,80 +256,35 @@ Returns a paginated list of peers.
 
 Invalid values return `400 Bad Request`.
 
-```bash
-curl "http://localhost:51821/peers?offset=0&limit=50" \
-  -H "X-API-Key: <your-api-key>"
-```
-
-```json
-{
-  "data": [
-    {
-      "peerId": "7c2f3f7a-6b4e-4f3f-8b2a-1a9b3c2d4e5f",
-      "allowedIPs": ["10.0.0.2/32"],
-      "addressFamilies": ["IPv4"]
-    }
-  ],
-  "meta": {
-    "offset": 0,
-    "limit": 50,
-    "totalItems": 42,
-    "hasPrev": false,
-    "hasNext": false
-  }
-}
-```
-
 ---
 
 ### POST /peers
 
-Creates a new peer, or rotates keys if the peer already exists.
+Creates a new peer, or rotates keys if the peer already exists. Key rotation preserves the peer's allocated IP — existing firewall rules and client configs remain valid.
 
 **Request body:**
 
 | Field | Required | Description |
 |-------|----------|-------------|
 | `peerId` | yes | UUIDv4 peer identifier |
-| `expiresAt` | no | RFC3339 timestamp; omit for a permanent peer |
+| `expiresAt` | no | RFC3339 timestamp; omit for a permanent peer. Expired peers are removed automatically by the node's background cleanup — no orchestrator action required |
 | `addressFamilies` | no | `["IPv4"]`, `["IPv6"]`, or `["IPv4","IPv6"]`; omit to use all families the node supports |
 
-```bash
-curl -X POST http://localhost:51821/peers \
-  -H "X-API-Key: <your-api-key>" \
-  -H "Content-Type: application/json" \
-  -d '{"peerId":"7c2f3f7a-6b4e-4f3f-8b2a-1a9b3c2d4e5f"}'
-```
+The response includes server public key and listen port, plus peer public key, private key, preshared key, and allocated IPs. The private key is returned only on creation and is never stored by the node.
 
-The response contains everything the client needs to configure WireGuard:
+Returns `409` if no IP addresses are available in the subnet.
 
-```json
-{
-  "server": {
-    "publicKey": "<server-public-key>",
-    "listenPort": 51820
-  },
-  "peer": {
-    "peerId": "7c2f3f7a-6b4e-4f3f-8b2a-1a9b3c2d4e5f",
-    "publicKey": "<peer-public-key>",
-    "privateKey": "<peer-private-key>",
-    "presharedKey": "<preshared-key>",
-    "allowedIPs": ["10.0.0.2/32"],
-    "addressFamilies": ["IPv4"]
-  }
-}
-```
+---
 
-> **Note:** The private key is returned only on creation and is never stored by the node.
+### GET /peers/:peerId
+
+Returns full details for a single peer: all fields from the list endpoint plus `receiveBytes` and `transmitBytes` traffic counters from the WireGuard kernel. Returns `404` if the peer does not exist.
 
 ---
 
 ### DELETE /peers/:peerId
 
-```bash
-curl -X DELETE http://localhost:51821/peers/7c2f3f7a-6b4e-4f3f-8b2a-1a9b3c2d4e5f \
-  -H "X-API-Key: <your-api-key>"
-```
+Removes the peer from the WireGuard interface and the peer store. Returns `404` if the peer does not exist.
 
 ## Peer store persistence
 
@@ -384,8 +300,21 @@ By default, peer state is in-memory only and is lost on restart. Enable persiste
 | Peer created / rotated / deleted | Store is written atomically (temp file + rename) |
 | Host reboot, interface recreated | Load file; re-add all stored peers to the device |
 | Subnet changed in config | On next startup, peers outside the new subnets are removed from the store and device |
+| Peer expires (`expiresAt` reached) | Removed automatically by a background goroutine; no orchestrator action required |
 
 **Storage format:** bbolt database file with peer records keyed by `peer_id` and containing `public_key`, `preshared_key`, `allowed_ips`, `created_at`, and optional `expires_at`. Private keys are never stored. The DB file is created with mode `0600` — create its directory with tight permissions.
+
+## Testing
+
+```bash
+# Run all tests
+go test ./...
+
+# Run benchmarks
+go test -bench=. ./...
+```
+
+Test coverage spans: HTTP handlers and middleware (auth, rate limiting, body limit, security headers, request ID), peer store (CRUD, pagination, persistence), WireGuard service (peer lifecycle, IP allocation, key rotation, expiry cleanup), and config validation.
 
 ## Trademark
 
