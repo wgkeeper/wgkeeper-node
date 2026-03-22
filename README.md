@@ -6,16 +6,14 @@
 
 <p align="center"><strong>REST API-driven WireGuard node for centralized orchestration.</strong></p>
 
-<p align="center">
-  <a href="https://github.com/wgkeeper/wgkeeper-node/actions/workflows/ci.yml"><img src="https://github.com/wgkeeper/wgkeeper-node/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" /></a>
-  <a href="https://github.com/wgkeeper/wgkeeper-node/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-AGPL_v3-blue.svg" alt="License" /></a>
-  <a href="https://github.com/wgkeeper/wgkeeper-node/releases/latest"><img src="https://img.shields.io/github/v/release/wgkeeper/wgkeeper-node" alt="GitHub Release" /></a>
-  <a href="https://github.com/wgkeeper/wgkeeper-node/pkgs/container/node"><img src="https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fghcr-badge.elias.eu.org%2Fapi%2Fwgkeeper%2Fwgkeeper-node%2Fnode&query=%24.downloadCount&label=image%20pulls&color=blue" alt="Image Pulls" /></a>
-  <a href="https://codecov.io/gh/wgkeeper/wgkeeper-node"><img src="https://codecov.io/gh/wgkeeper/wgkeeper-node/graph/badge.svg" alt="codecov" /></a>
-  <a href="https://goreportcard.com/report/github.com/wgkeeper/wgkeeper-node"><img src="https://goreportcard.com/badge/github.com/wgkeeper/wgkeeper-node" alt="Go Report Card" /></a>
-  <a href="https://pkg.go.dev/github.com/wgkeeper/wgkeeper-node"><img src="https://pkg.go.dev/badge/github.com/wgkeeper/wgkeeper-node.svg" alt="Go Reference" /></a>
-  <a href="https://github.com/wgkeeper/wgkeeper-node/blob/main/go.mod"><img src="https://img.shields.io/github/go-mod/go-version/wgkeeper/wgkeeper-node" alt="Go" /></a>
-</p>
+[![CI](https://github.com/wgkeeper/wgkeeper-node/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/wgkeeper/wgkeeper-node/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://github.com/wgkeeper/wgkeeper-node/blob/main/LICENSE)
+[![GitHub Release](https://img.shields.io/github/v/release/wgkeeper/wgkeeper-node)](https://github.com/wgkeeper/wgkeeper-node/releases/latest)
+[![Image Pulls](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fghcr-badge.elias.eu.org%2Fapi%2Fwgkeeper%2Fwgkeeper-node%2Fnode&query=%24.downloadCount&label=image%20pulls&color=blue)](https://github.com/wgkeeper/wgkeeper-node/pkgs/container/node)
+[![codecov](https://codecov.io/gh/wgkeeper/wgkeeper-node/graph/badge.svg)](https://codecov.io/gh/wgkeeper/wgkeeper-node)
+[![Go Report Card](https://goreportcard.com/badge/github.com/wgkeeper/wgkeeper-node)](https://goreportcard.com/report/github.com/wgkeeper/wgkeeper-node)
+[![Go Reference](https://pkg.go.dev/badge/github.com/wgkeeper/wgkeeper-node.svg)](https://pkg.go.dev/github.com/wgkeeper/wgkeeper-node)
+[![Go](https://img.shields.io/github/go-mod/go-version/wgkeeper/wgkeeper-node)](https://github.com/wgkeeper/wgkeeper-node/blob/main/go.mod)
 
 ---
 
