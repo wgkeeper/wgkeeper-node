@@ -16,7 +16,6 @@ LICENSE
 # Config files (not needed in build)
 config*.yaml
 Caddyfile
-docker-compose*.yml
 
 # Secrets
 .env
@@ -25,3 +24,9 @@ docker-compose*.yml
 # Coverage artefacts
 cover*.out
 coverage*.out
+coverage.txt
+base.txt
+pr.txt
+docker-compose*.yml
+lefthook.yml
+**/*_test.go
