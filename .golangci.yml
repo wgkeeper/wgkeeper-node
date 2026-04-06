@@ -9,7 +9,10 @@ linters:
     - staticcheck
     - ineffassign
     - unconvert
-    - gofmt
-    - goimports
     - misspell
     - unparam
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
