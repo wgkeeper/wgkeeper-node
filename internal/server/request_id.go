@@ -33,13 +33,19 @@ func requestIDMiddleware() gin.HandlerFunc {
 // GetRequestID returns the request ID from the gin context, or empty string if not set.
 func GetRequestID(c *gin.Context) string {
 	id, _ := c.Get(requestIDKey)
-	s, _ := id.(string)
+	s, ok := id.(string)
+	if !ok {
+		return ""
+	}
 	return s
 }
 
 // GetRequestIDFromContext returns the request ID from the request context.
 // Useful for log formatters and monitoring that only have access to http.Request.
 func GetRequestIDFromContext(ctx context.Context) string {
-	id, _ := ctx.Value(requestIDCtxKey{}).(string)
+	id, ok := ctx.Value(requestIDCtxKey{}).(string)
+	if !ok {
+		return ""
+	}
 	return id
 }

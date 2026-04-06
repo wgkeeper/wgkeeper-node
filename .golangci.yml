@@ -4,13 +4,31 @@ run:
   timeout: 5m
 
 linters:
+  default: standard
   enable:
+    - bodyclose
+    - errcheck
+    - errorlint
+    - noctx
+    - revive
     - gosec
-    - staticcheck
-    - ineffassign
     - unconvert
     - misspell
     - unparam
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+    revive:
+      severity: warning
+  exclusions:
+    rules:
+      - path: '.*_test\.go$'
+        linters:
+          - errcheck
+          - gosec
+          - noctx
 
 formatters:
   enable:

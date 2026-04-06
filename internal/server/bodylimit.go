@@ -40,7 +40,10 @@ func bodyLimitMiddleware(maxBytes int64) gin.HandlerFunc {
 				c.AbortWithStatus(http.StatusBadRequest)
 				return
 			}
-			_ = c.Request.Body.Close()
+			if err := c.Request.Body.Close(); err != nil {
+				c.AbortWithStatus(http.StatusBadRequest)
+				return
+			}
 			c.Request.Body = io.NopCloser(bytes.NewReader(buf))
 		}
 		c.Next()

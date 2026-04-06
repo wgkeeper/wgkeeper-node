@@ -1,6 +1,7 @@
 package wireguard
 
 import (
+	"fmt"
 	"net"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
@@ -33,7 +34,10 @@ func (f FakeClient) ConfigureDevice(_ string, _ wgtypes.Config) error {
 // fake wg client, minimal subnet so Stats works). Use it from server package for
 // router integration tests.
 func NewTestService() *WireGuardService {
-	_, subnet4, _ := net.ParseCIDR("10.0.0.0/24")
+	_, subnet4, err := net.ParseCIDR("10.0.0.0/24")
+	if err != nil {
+		panic(fmt.Sprintf("invalid test subnet: %v", err))
+	}
 	return &WireGuardService{
 		client:     FakeClient{Dev: &wgtypes.Device{}},
 		deviceName: "wg0",

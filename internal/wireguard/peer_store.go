@@ -236,7 +236,9 @@ func (s *PeerStore) OpenFile(path string) error {
 		return err
 	}
 	if err := s.loadFromDB(db); err != nil {
-		_ = db.Close()
+		if closeErr := db.Close(); closeErr != nil {
+			return errors.Join(err, closeErr)
+		}
 		return err
 	}
 	s.db = db

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -138,7 +139,7 @@ func protocolFromConfig(cfg config.Config) string {
 }
 
 func isFatalServerError(err error) bool {
-	return err != nil && err != http.ErrServerClosed
+	return err != nil && !errors.Is(err, http.ErrServerClosed)
 }
 
 func newHTTPServer(ctx context.Context, cfg config.Config, addr string, wgService *wireguard.WireGuardService, debug bool) *http.Server {

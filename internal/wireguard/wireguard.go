@@ -2,6 +2,7 @@ package wireguard
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -1054,7 +1055,9 @@ func ipToUint32(ip net.IP) uint32 {
 }
 
 func uint32ToIP(value uint32) net.IP {
-	return net.IPv4(byte(value>>24), byte(value>>16), byte(value>>8), byte(value))
+	ip := make(net.IP, net.IPv4len)
+	binary.BigEndian.PutUint32(ip, value)
+	return ip
 }
 
 func ipv6Range(subnet *net.IPNet) (net.IP, net.IP, error) {

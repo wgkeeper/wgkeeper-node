@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -67,7 +68,9 @@ func LoadConfig() (Config, error) {
 	if configPath == "" {
 		configPath = "config.yaml"
 	}
+	configPath = filepath.Clean(configPath)
 
+	// #nosec G703 -- NODE_CONFIG is intentionally operator-controlled.
 	info, err := os.Stat(configPath)
 	if err == nil {
 		if info.IsDir() {
@@ -82,6 +85,7 @@ func LoadConfig() (Config, error) {
 }
 
 func loadConfigFile(path string) (Config, error) {
+	// #nosec G304 -- Reading the operator-selected config path is intended behavior.
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("read config: %w", err)
@@ -192,27 +196,29 @@ func validateWireGuardSubnets(wgSubnet, wgSubnet6 string) error {
 }
 
 func validateWireGuardSubnet4(wgSubnet string) error {
-	_, ipNet, _ := net.ParseCIDR(wgSubnet)
-	if ipNet != nil && ipNet.IP.To4() == nil {
+	_, ipNet, err := net.ParseCIDR(wgSubnet)
+	if err != nil {
+		return fmt.Errorf("wireguard.subnet must be a valid IPv4 CIDR: %w", err)
+	}
+	if ipNet.IP.To4() == nil {
 		return fmt.Errorf("wireguard.subnet must be an IPv4 CIDR")
 	}
-	if ipNet != nil {
-		if ones, _ := ipNet.Mask.Size(); ones > 30 {
-			return fmt.Errorf("wireguard.subnet prefix /%d is too long; maximum supported prefix is /30", ones)
-		}
+	if ones, _ := ipNet.Mask.Size(); ones > 30 {
+		return fmt.Errorf("wireguard.subnet prefix /%d is too long; maximum supported prefix is /30", ones)
 	}
 	return nil
 }
 
 func validateWireGuardSubnet6(wgSubnet6 string) error {
-	_, ipNet, _ := net.ParseCIDR(wgSubnet6)
-	if ipNet != nil && ipNet.IP.To4() != nil {
+	_, ipNet, err := net.ParseCIDR(wgSubnet6)
+	if err != nil {
+		return fmt.Errorf("wireguard.subnet6 must be a valid IPv6 CIDR: %w", err)
+	}
+	if ipNet.IP.To4() != nil {
 		return fmt.Errorf("wireguard.subnet6 must be an IPv6 CIDR")
 	}
-	if ipNet != nil {
-		if ones, _ := ipNet.Mask.Size(); ones > 126 {
-			return fmt.Errorf("wireguard.subnet6 prefix /%d is too long; maximum supported prefix is /126", ones)
-		}
+	if ones, _ := ipNet.Mask.Size(); ones > 126 {
+		return fmt.Errorf("wireguard.subnet6 prefix /%d is too long; maximum supported prefix is /126", ones)
 	}
 	return nil
 }

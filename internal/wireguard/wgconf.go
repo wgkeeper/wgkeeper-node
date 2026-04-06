@@ -108,11 +108,11 @@ func addressLineFromSubnet6(subnetStr, serverIP string) (string, error) {
 
 func buildConfigContent(privateKey string, addressLines []string, listenPort int, cfg config.Config) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("[Interface]\nPrivateKey = %s\n", privateKey))
+	_, _ = fmt.Fprintf(&sb, "[Interface]\nPrivateKey = %s\n", privateKey)
 	for _, a := range addressLines {
-		sb.WriteString(fmt.Sprintf("Address = %s\n", a))
+		_, _ = fmt.Fprintf(&sb, "Address = %s\n", a)
 	}
-	sb.WriteString(fmt.Sprintf("ListenPort = %d\n", listenPort))
+	_, _ = fmt.Fprintf(&sb, "ListenPort = %d\n", listenPort)
 	postUp, postDown := buildRoutingRules(cfg)
 	if len(postUp) > 0 {
 		sb.WriteString("PostUp = " + strings.Join(postUp, "; ") + "\n")
