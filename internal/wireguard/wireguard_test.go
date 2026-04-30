@@ -482,9 +482,6 @@ func TestPersistPutNoopWhenNoDB(t *testing.T) {
 	if err := store.PersistPut(rec); err != nil {
 		t.Fatalf("PersistPut with no DB open: expected nil, got %v", err)
 	}
-	if err := store.PersistPutIfPresent(rec); err != nil {
-		t.Fatalf("PersistPutIfPresent with no DB open: expected nil, got %v", err)
-	}
 	if err := store.PersistDeleteBatch(peerIDTest); err != nil {
 		t.Fatalf("PersistDeleteBatch with no DB open: expected nil, got %v", err)
 	}
@@ -598,7 +595,7 @@ func TestDeletePeerSavePersistError(t *testing.T) {
 		PresharedKey: wgtypes.Key{},
 		AllowedIPs:   []net.IPNet{ipNet(t, ipPeerTest)},
 	})
-	err := svc.DeletePeer(peerIDTest)
+	_, err := svc.DeletePeer(peerIDTest)
 	if err == nil {
 		t.Fatal("expected error when persist fails after delete")
 	}
@@ -743,4 +740,180 @@ func TestEnsurePeerDuplicateRotates(t *testing.T) {
 	if rec.PublicKey == key {
 		t.Error("public key should have been rotated")
 	}
+}
+
+// TestEnsurePeerCreateRollbacksOnDeviceFailure verifies the write-ahead order:
+// on a new peer, PersistPut runs before configureDevice; if configureDevice
+// fails the bbolt record is rolled back and the IP is released so a retry can
+// allocate the same address.
+func TestEnsurePeerCreateRollbacksOnDeviceFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + peersDBFile
+	_, subnet4, _ := net.ParseCIDR("10.0.0.0/30") // only 1 usable IP
+	svc := &WireGuardService{
+		client:     fakeWGClient{device: &wgtypes.Device{}, configureErr: errors.New("device busy")},
+		deviceName: "wg0",
+		subnet4:    subnet4,
+		serverIP4:  net.ParseIP(ipServerTest),
+		store:      NewPeerStore(),
+	}
+	if err := svc.store.OpenFile(path); err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	defer svc.store.Close()
+	svc.initUsedIPs()
+
+	if _, err := svc.EnsurePeer(peerIDNewPeer, nil, nil); err == nil {
+		t.Fatal("expected device error from EnsurePeer")
+	}
+
+	// In-memory: peer must not be present.
+	if _, ok := svc.store.Get(peerIDNewPeer); ok {
+		t.Error("peer must not remain in memory after configureDevice failure")
+	}
+	// IP cache: must be released (otherwise a retry would 409 with no IP).
+	if _, used := svc.usedIPs[ipPeerTest]; used {
+		t.Error("IP must be released after rollback")
+	}
+	// Persist: bbolt must not contain the peer (rollback succeeded).
+	svc.store.Close()
+	store2 := NewPeerStore()
+	if err := store2.OpenFile(path); err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer store2.Close()
+	if _, ok := store2.Get(peerIDNewPeer); ok {
+		t.Error("peer must not be persisted after configureDevice failure")
+	}
+}
+
+// TestEnsurePeerRotateRollbacksOnDeviceFailure verifies that a failed
+// configureDevice during rotation rolls bbolt back to the original record so
+// a restart restores the still-working old key on the device.
+func TestEnsurePeerRotateRollbacksOnDeviceFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + peersDBFile
+	_, subnet4, _ := net.ParseCIDR(subnetTestCIDR)
+	originalKey, _ := wgtypes.GenerateKey()
+	psk, _ := wgtypes.GenerateKey()
+
+	// Open the store, persist the original record, then attach the configure-failing client.
+	store := NewPeerStore()
+	if err := store.OpenFile(path); err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	rec := PeerRecord{
+		PeerID:       peerIDTest,
+		PublicKey:    originalKey,
+		PresharedKey: psk,
+		AllowedIPs:   []net.IPNet{ipNet(t, ipPeerTest)},
+		CreatedAt:    time.Now().UTC(),
+	}
+	store.Set(rec)
+	if err := store.PersistPut(rec); err != nil {
+		t.Fatalf("PersistPut original: %v", err)
+	}
+
+	svc := &WireGuardService{
+		client:     fakeWGClient{device: &wgtypes.Device{}, configureErr: errors.New("device busy")},
+		deviceName: "wg0",
+		subnet4:    subnet4,
+		serverIP4:  net.ParseIP(ipServerTest),
+		store:      store,
+		usedIPs:    map[string]struct{}{ipPeerTest: {}},
+	}
+
+	if _, err := svc.EnsurePeer(peerIDTest, nil, nil); err == nil {
+		t.Fatal("expected device error during rotation")
+	}
+
+	// bbolt must hold the ORIGINAL key after rollback (not the new one).
+	store.Close()
+	store2 := NewPeerStore()
+	if err := store2.OpenFile(path); err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer store2.Close()
+	got, ok := store2.Get(peerIDTest)
+	if !ok {
+		t.Fatal("peer must remain in bbolt after failed rotation")
+	}
+	if got.PublicKey != originalKey {
+		t.Error("bbolt must hold original key after rotation rollback, got new key")
+	}
+}
+
+// TestReconcileRemovesOrphanFromDevice verifies the device→store direction of
+// reconcileStoreWithDevice: peers present on the device but not in the store
+// are removed (recovers from a crash mid-write or manual `wg set` calls).
+func TestReconcileRemovesOrphanFromDevice(t *testing.T) {
+	orphanKey, _ := wgtypes.GenerateKey()
+	storedKey, _ := wgtypes.GenerateKey()
+	psk, _ := wgtypes.GenerateKey()
+
+	client := &recordingWGClient{
+		device: &wgtypes.Device{
+			Peers: []wgtypes.Peer{
+				{PublicKey: orphanKey, AllowedIPs: []net.IPNet{ipNet(t, "10.0.0.99")}},
+				{PublicKey: storedKey, AllowedIPs: []net.IPNet{ipNet(t, ipPeerTest)}},
+			},
+		},
+	}
+	_, subnet4, _ := net.ParseCIDR(subnetTestCIDR)
+	svc := &WireGuardService{
+		client:     client,
+		deviceName: "wg0",
+		subnet4:    subnet4,
+		serverIP4:  net.ParseIP(ipServerTest),
+		store:      NewPeerStore(),
+	}
+	svc.store.Set(PeerRecord{
+		PeerID:       peerIDTest,
+		PublicKey:    storedKey,
+		PresharedKey: psk,
+		AllowedIPs:   []net.IPNet{ipNet(t, ipPeerTest)},
+		CreatedAt:    time.Now().UTC(),
+	})
+
+	if err := svc.reconcileStoreWithDevice(); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	// Exactly one configureDevice call expected, removing the orphan.
+	if len(client.configureCalls) != 1 {
+		t.Fatalf("expected 1 configureDevice call, got %d", len(client.configureCalls))
+	}
+	peers := client.configureCalls[0].Peers
+	var sawOrphanRemove bool
+	for _, p := range peers {
+		if p.PublicKey == orphanKey && p.Remove {
+			sawOrphanRemove = true
+		}
+		if p.PublicKey == storedKey {
+			t.Error("stored peer should not be touched by reconcile")
+		}
+	}
+	if !sawOrphanRemove {
+		t.Error("orphan peer must be marked for removal")
+	}
+}
+
+// recordingWGClient captures every ConfigureDevice call for assertions.
+type recordingWGClient struct {
+	device         *wgtypes.Device
+	err            error
+	configureErr   error
+	configureCalls []wgtypes.Config
+}
+
+func (c *recordingWGClient) Device(_ string) (*wgtypes.Device, error) {
+	if c.err != nil {
+		return nil, c.err
+	}
+	return c.device, nil
+}
+
+func (c *recordingWGClient) ConfigureDevice(_ string, cfg wgtypes.Config) error {
+	c.configureCalls = append(c.configureCalls, cfg)
+	return c.configureErr
 }

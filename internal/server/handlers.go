@@ -95,19 +95,41 @@ func createPeerHandler(wgService wgPeerService, debug bool) gin.HandlerFunc {
 		info, err := wgService.EnsurePeer(req.PeerID, expiresAt, req.AddressFamilies)
 		if err != nil {
 			status, message, reason := peerError(err)
-			slog.Error("peer create failed", "reason", reason)
+			slog.Error("peer create failed",
+				"reason", reason,
+				"peerId", req.PeerID,
+				"client_ip", c.ClientIP(),
+				"request_id", GetRequestIDFromContext(c.Request.Context()),
+			)
 			writeError(c, status, message, reason, debug, err)
 			return
 		}
 
 		serverPublicKey, serverListenPort, err := wgService.ServerInfo()
 		if err != nil {
-			slog.Error("peer create failed", "reason", "server_info_unavailable")
+			slog.Error("peer create failed",
+				"reason", "server_info_unavailable",
+				"peerId", req.PeerID,
+				"client_ip", c.ClientIP(),
+				"request_id", GetRequestIDFromContext(c.Request.Context()),
+			)
 			writeError(c, http.StatusInternalServerError, "server public key unavailable", "server_info_unavailable", debug, err)
 			return
 		}
 
-		slog.Info("peer created", "peerId", req.PeerID)
+		event := "audit.peer_created"
+		if info.Rotated {
+			event = "audit.peer_rotated"
+		}
+		slog.Info(event,
+			"peerId", req.PeerID,
+			"publicKey", info.PublicKey,
+			"allowedIPs", info.AllowedIPs,
+			"addressFamilies", info.AddressFamilies,
+			"expiresAt", formatExpiresAtForLog(expiresAt),
+			"client_ip", c.ClientIP(),
+			"request_id", GetRequestIDFromContext(c.Request.Context()),
+		)
 		// Private and preshared keys must never be cached by proxies or browsers.
 		c.Header("Cache-Control", "no-store, private, no-cache")
 		c.Header("Pragma", "no-cache")
@@ -136,14 +158,25 @@ func deletePeerHandler(wgService wgPeerService, debug bool) gin.HandlerFunc {
 			return
 		}
 
-		if err := wgService.DeletePeer(peerID); err != nil {
+		allowedIPs, err := wgService.DeletePeer(peerID)
+		if err != nil {
 			status, message, reason := peerError(err)
-			slog.Error("peer delete failed", "reason", reason)
+			slog.Error("peer delete failed",
+				"reason", reason,
+				"peerId", peerID,
+				"client_ip", c.ClientIP(),
+				"request_id", GetRequestIDFromContext(c.Request.Context()),
+			)
 			writeError(c, status, message, reason, debug, err)
 			return
 		}
 
-		slog.Info("peer deleted", "peerId", peerID)
+		slog.Info("audit.peer_deleted",
+			"peerId", peerID,
+			"allowedIPs", allowedIPs,
+			"client_ip", c.ClientIP(),
+			"request_id", GetRequestIDFromContext(c.Request.Context()),
+		)
 		c.JSON(http.StatusOK, DeletePeerResponse{Status: "ok"})
 	}
 }
@@ -243,6 +276,14 @@ func getPeerHandler(wgService wgPeerDetailProvider, debug bool) gin.HandlerFunc 
 	}
 }
 
+// formatExpiresAtForLog renders expiresAt for audit logs. nil = "permanent".
+func formatExpiresAtForLog(t *time.Time) string {
+	if t == nil {
+		return "permanent"
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
 // parseExpiresAt parses optional RFC3339 date. If nil or empty, returns (nil, nil).
 // If provided, must be in the future; otherwise returns error.
 func parseExpiresAt(s *string) (*time.Time, error) {
@@ -286,7 +327,8 @@ func writeError(c *gin.Context, status int, message, code string, debug bool, er
 
 type wgPeerService interface {
 	EnsurePeer(peerID string, expiresAt *time.Time, addressFamilies []string) (wireguard.PeerInfo, error)
-	DeletePeer(string) error
+	// DeletePeer returns the AllowedIPs that were freed (for audit logging).
+	DeletePeer(string) ([]string, error)
 	ServerInfo() (string, int, error)
 }
 

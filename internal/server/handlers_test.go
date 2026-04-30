@@ -54,7 +54,7 @@ func assertJSONErrorCode(t *testing.T, body []byte, wantCode string) {
 type mockWGService struct {
 	statsFunc      func() (wireguard.Stats, error)
 	ensurePeerFunc func(peerID string, expiresAt *time.Time, addressFamilies []string) (wireguard.PeerInfo, error)
-	deletePeerFunc func(string) error
+	deletePeerFunc func(string) ([]string, error)
 	serverInfoFunc func() (string, int, error)
 	listPeersFunc  func(offset, limit int) ([]wireguard.PeerListItem, int, error)
 	getPeerFunc    func(string) (*wireguard.PeerDetail, error)
@@ -68,7 +68,7 @@ func (m mockWGService) EnsurePeer(peerID string, expiresAt *time.Time, addressFa
 	return m.ensurePeerFunc(peerID, expiresAt, addressFamilies)
 }
 
-func (m mockWGService) DeletePeer(peerID string) error {
+func (m mockWGService) DeletePeer(peerID string) ([]string, error) {
 	return m.deletePeerFunc(peerID)
 }
 
@@ -331,8 +331,8 @@ func TestDeletePeerInvalidID(t *testing.T) {
 func TestDeletePeerNotFound(t *testing.T) {
 	router := newTestRouter()
 	router.DELETE(pathPeersPeerID, apiKeyMiddleware(testAPIKey), deletePeerHandler(mockWGService{
-		deletePeerFunc: func(string) error {
-			return wireguard.ErrPeerNotFound
+		deletePeerFunc: func(string) ([]string, error) {
+			return nil, wireguard.ErrPeerNotFound
 		},
 	}, false))
 
@@ -343,8 +343,8 @@ func TestDeletePeerNotFound(t *testing.T) {
 func TestDeletePeerSuccess(t *testing.T) {
 	router := newTestRouter()
 	router.DELETE(pathPeersPeerID, apiKeyMiddleware(testAPIKey), deletePeerHandler(mockWGService{
-		deletePeerFunc: func(string) error {
-			return nil
+		deletePeerFunc: func(string) ([]string, error) {
+			return []string{"10.0.0.2/32"}, nil
 		},
 	}, false))
 
@@ -355,8 +355,8 @@ func TestDeletePeerSuccess(t *testing.T) {
 func TestDeletePeerWireguardError(t *testing.T) {
 	router := newTestRouter()
 	router.DELETE(pathPeersPeerID, apiKeyMiddleware(testAPIKey), deletePeerHandler(mockWGService{
-		deletePeerFunc: func(string) error {
-			return errors.New("device busy")
+		deletePeerFunc: func(string) ([]string, error) {
+			return nil, errors.New("device busy")
 		},
 	}, false))
 

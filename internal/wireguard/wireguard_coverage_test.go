@@ -39,7 +39,7 @@ func TestDeletePeerNotFound(t *testing.T) {
 		deviceName: "wg0",
 		store:      NewPeerStore(),
 	}
-	err := svc.DeletePeer("nonexistent")
+	_, err := svc.DeletePeer("nonexistent")
 	if !errors.Is(err, ErrPeerNotFound) {
 		t.Fatalf("expected ErrPeerNotFound, got %v", err)
 	}
@@ -811,7 +811,7 @@ func TestDeletePeerDeviceError(t *testing.T) {
 		AllowedIPs:   mustParseCIDRs(t, testPeerIP4),
 	})
 
-	if svc.DeletePeer(testDelFailPeerID) == nil {
+	if _, err := svc.DeletePeer(testDelFailPeerID); err == nil {
 		t.Fatal("expected error when ConfigureDevice fails")
 	}
 	// Peer should still be in store since device removal failed
