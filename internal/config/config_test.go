@@ -673,3 +673,135 @@ func TestValidateWireGuardSubnet6PrefixTooLong(t *testing.T) {
 		t.Fatalf("expected /126 IPv6 to be valid in validateWireGuardSubnet6, got %v", err)
 	}
 }
+
+// ---------- metrics: optional Prometheus endpoint ----------
+
+const baseConfigForMetrics = `
+server:
+  port: "51821"
+auth:
+  api_key: "test-api-key-secure-key-longer!!"
+wireguard:
+  interface: "wg0"
+  subnet: "10.0.0.0/24"
+  server_ip: "10.0.0.1"
+  listen_port: 51820
+  routing:
+    wan_interface: "eth0"
+`
+
+func TestLoadConfigMetricsDisabledByDefault(t *testing.T) {
+	path := writeConfigFile(t, baseConfigForMetrics)
+	t.Setenv("NODE_CONFIG", path)
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf(msgExpectedNoError, err)
+	}
+	if cfg.MetricsEnabled() {
+		t.Errorf("metrics should be disabled when metrics block is absent")
+	}
+	if cfg.MetricsPort != 0 {
+		t.Errorf("expected MetricsPort=0 by default, got %d", cfg.MetricsPort)
+	}
+}
+
+func TestLoadConfigMetricsEnabledRequiresToken(t *testing.T) {
+	path := writeConfigFile(t, baseConfigForMetrics+`
+metrics:
+  port: 9090
+`)
+	t.Setenv("NODE_CONFIG", path)
+
+	if _, err := LoadConfig(); err == nil {
+		t.Fatal("expected error: metrics.port set without metrics.token")
+	}
+}
+
+func TestLoadConfigMetricsTokenTooShort(t *testing.T) {
+	path := writeConfigFile(t, baseConfigForMetrics+`
+metrics:
+  port: 9090
+  token: "short"
+`)
+	t.Setenv("NODE_CONFIG", path)
+
+	if _, err := LoadConfig(); err == nil {
+		t.Fatal("expected error: metrics.token below minimum length")
+	}
+}
+
+func TestLoadConfigMetricsTokenMustDifferFromAPIKey(t *testing.T) {
+	path := writeConfigFile(t, baseConfigForMetrics+`
+metrics:
+  port: 9090
+  token: "test-api-key-secure-key-longer!!"
+`)
+	t.Setenv("NODE_CONFIG", path)
+
+	if _, err := LoadConfig(); err == nil {
+		t.Fatal("expected error: metrics.token must differ from auth.api_key")
+	}
+}
+
+func TestLoadConfigMetricsValid(t *testing.T) {
+	path := writeConfigFile(t, baseConfigForMetrics+`
+metrics:
+  port: 9090
+  token: "metrics-bearer-token-32chars-min!"
+`)
+	t.Setenv("NODE_CONFIG", path)
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf(msgExpectedNoError, err)
+	}
+	if !cfg.MetricsEnabled() {
+		t.Error("metrics should be enabled")
+	}
+	if cfg.MetricsPort != 9090 {
+		t.Errorf("expected MetricsPort=9090, got %d", cfg.MetricsPort)
+	}
+	if cfg.MetricsAddr() != ":9090" {
+		t.Errorf("expected MetricsAddr=:9090, got %q", cfg.MetricsAddr())
+	}
+}
+
+func TestLoadConfigMetricsInvalidPort(t *testing.T) {
+	for _, port := range []int{-1, 65536, 70000} {
+		t.Run("port", func(t *testing.T) {
+			path := writeConfigFile(t, baseConfigForMetrics+`
+metrics:
+  port: `+itoa(port)+`
+  token: "metrics-bearer-token-32chars-min!"
+`)
+			t.Setenv("NODE_CONFIG", path)
+			if _, err := LoadConfig(); err == nil {
+				t.Fatalf("expected error for invalid metrics.port=%d", port)
+			}
+		})
+	}
+}
+
+// itoa avoids pulling fmt into the test for a single conversion.
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	var buf [11]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	if neg {
+		i--
+		buf[i] = '-'
+	}
+	return string(buf[i:])
+}

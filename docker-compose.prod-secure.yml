@@ -14,6 +14,11 @@ services:
     # In production we expose only the WireGuard UDP port on the host.
     # The REST API port (51821) stays internal to the Docker network and is
     # only reachable via the Caddy reverse proxy.
+    #
+    # If `metrics:` is enabled in config.yaml, the metrics port lives only
+    # inside this Docker network too. Do NOT publish it on the host. For
+    # external scraping, run a separate Caddy site (e.g. metrics.example.com)
+    # with mTLS, or run Prometheus in this same compose.
     ports:
       - "51820:51820/udp"
     sysctls:

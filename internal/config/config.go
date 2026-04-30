@@ -17,8 +17,9 @@ import (
 var validNetworkInterface = regexp.MustCompile(`^[a-zA-Z0-9\-_.]+$`)
 
 const (
-	errMsgRequired  = "%s is required"
-	minAPIKeyLength = 32
+	errMsgRequired        = "%s is required"
+	minAPIKeyLength       = 32
+	minMetricsTokenLength = 32
 )
 
 type Config struct {
@@ -35,6 +36,16 @@ type Config struct {
 	WGListenPort  int
 	WANInterface  string
 	PeerStoreFile string // optional: path to bbolt DB file for persistent peer store; empty = in-memory only
+
+	// MetricsPort is the TCP port for the optional Prometheus /metrics
+	// endpoint. Zero disables the endpoint entirely (no listener is created).
+	// When non-zero, MetricsToken MUST be set (config validation enforces this).
+	MetricsPort int
+
+	// MetricsToken is the bearer token required for /metrics scraping. It is a
+	// distinct secret from APIKey: compromise of the scrape token must not
+	// grant peer-management access. Required when MetricsPort > 0.
+	MetricsToken string
 }
 
 type wireguardRouting struct {
@@ -61,6 +72,10 @@ type fileConfig struct {
 		Routing       wireguardRouting `yaml:"routing"`
 		PeerStoreFile string           `yaml:"peer_store_file"`
 	} `yaml:"wireguard"`
+	Metrics struct {
+		Port  int    `yaml:"port"`
+		Token string `yaml:"token"`
+	} `yaml:"metrics"`
 }
 
 func LoadConfig() (Config, error) {
@@ -102,6 +117,10 @@ func loadConfigFile(path string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	metricsPort, metricsToken, err := parseMetrics(fc)
+	if err != nil {
+		return Config{}, err
+	}
 	return Config{
 		Port:          portValue,
 		APIKey:        apiKey,
@@ -116,7 +135,45 @@ func loadConfigFile(path string) (Config, error) {
 		WGListenPort:  wgListenPort,
 		WANInterface:  wanInterface,
 		PeerStoreFile: strings.TrimSpace(peerStoreFile),
+		MetricsPort:   metricsPort,
+		MetricsToken:  metricsToken,
 	}, nil
+}
+
+// parseMetrics validates the optional metrics block. Disabled by default
+// (port == 0). When enabled, the token is mandatory and must meet the same
+// minimum length as auth.api_key — refusing the unauthenticated configuration
+// at startup is the main guarantee of this section.
+func parseMetrics(fc fileConfig) (port int, token string, err error) {
+	port = fc.Metrics.Port
+	token = strings.TrimSpace(fc.Metrics.Token)
+	if port == 0 {
+		// Endpoint disabled. Token is ignored — no need to validate it.
+		return 0, "", nil
+	}
+	if port < 1 || port > 65535 {
+		return 0, "", fmt.Errorf("metrics.port must be 0 (disabled) or a valid TCP port (1..65535)")
+	}
+	if len(token) < minMetricsTokenLength {
+		return 0, "", fmt.Errorf("metrics.token must be at least %d characters when metrics.port is set; do not reuse auth.api_key", minMetricsTokenLength)
+	}
+	if token == fc.Auth.APIKey {
+		return 0, "", fmt.Errorf("metrics.token must differ from auth.api_key (use a separate secret for the scrape endpoint)")
+	}
+	return port, token, nil
+}
+
+// MetricsEnabled reports whether the optional Prometheus /metrics endpoint is
+// configured to start.
+func (c Config) MetricsEnabled() bool {
+	return c.MetricsPort > 0
+}
+
+// MetricsAddr returns the listen address for the metrics server. Bound to all
+// interfaces inside the host/container; network-level isolation (Docker
+// network, firewall) is the operator's responsibility.
+func (c Config) MetricsAddr() string {
+	return fmt.Sprintf(":%d", c.MetricsPort)
 }
 
 func parseServerAndAuth(fc fileConfig) (portValue int, apiKey, tlsCert, tlsKey string, allowedNets []*net.IPNet, err error) {

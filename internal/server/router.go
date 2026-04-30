@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 
+	"github.com/wgkeeper/wgkeeper-node/internal/metrics"
 	"github.com/wgkeeper/wgkeeper-node/internal/wireguard"
 
 	"github.com/gin-gonic/gin"
@@ -13,7 +14,9 @@ import (
 
 const debugKey = "debug"
 
-func NewRouter(ctx context.Context, apiKey string, allowedNets []*net.IPNet, wgService *wireguard.WireGuardService, debug bool) *gin.Engine {
+// NewRouter builds the API router. m is optional — pass nil when metrics are
+// disabled; handlers nil-check before recording.
+func NewRouter(ctx context.Context, apiKey string, allowedNets []*net.IPNet, wgService *wireguard.WireGuardService, m *metrics.Metrics, debug bool) *gin.Engine {
 	router := gin.New()
 	// Trust only loopback proxies (e.g. Caddy on the same host).
 	// This prevents X-Forwarded-For spoofing from external clients.
@@ -46,7 +49,7 @@ func NewRouter(ctx context.Context, apiKey string, allowedNets []*net.IPNet, wgS
 		)
 		return ""
 	}), gin.Recovery())
-	registerRoutes(router, apiKey, allowedNets, wgService, debug)
+	registerRoutes(router, apiKey, allowedNets, wgService, m, debug)
 	return router
 }
 
@@ -57,7 +60,7 @@ func debugMiddleware(debug bool) gin.HandlerFunc {
 	}
 }
 
-func registerRoutes(router *gin.Engine, apiKey string, allowedNets []*net.IPNet, wgService *wireguard.WireGuardService, debug bool) {
+func registerRoutes(router *gin.Engine, apiKey string, allowedNets []*net.IPNet, wgService *wireguard.WireGuardService, m *metrics.Metrics, debug bool) {
 	// Liveness probe: process is up and able to serve requests.
 	router.GET("/healthz", healthHandler)
 	// Readiness probe: WireGuard backend is reachable and stats can be fetched.
@@ -67,6 +70,6 @@ func registerRoutes(router *gin.Engine, apiKey string, allowedNets []*net.IPNet,
 	peers := router.Group("/peers", ipWhitelistMiddleware(allowedNets), apiKeyMiddleware(apiKey))
 	peers.GET("", listPeersHandler(wgService, debug))
 	peers.GET("/:peerId", getPeerHandler(wgService, debug))
-	peers.POST("", createPeerHandler(wgService, debug))
-	peers.DELETE("/:peerId", deletePeerHandler(wgService, debug))
+	peers.POST("", createPeerHandler(wgService, m, debug))
+	peers.DELETE("/:peerId", deletePeerHandler(wgService, m, debug))
 }

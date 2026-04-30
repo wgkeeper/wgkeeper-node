@@ -1,0 +1,25 @@
+# Example Prometheus scrape config for wgkeeper-node.
+#
+# Mount this file at /etc/prometheus/prometheus.yml and the bearer token at
+# /etc/prometheus/wgkeeper-token. The token is the value of metrics.token
+# from wgkeeper's config.yaml — generate it with:
+#   openssl rand -hex 32 > wgkeeper-token
+#
+# In a Docker compose where wgkeeper is the service named "wireguard",
+# Prometheus reaches it via DNS — the metrics port is never published on the
+# host. See README → Metrics for the full pattern.
+
+global:
+  scrape_interval: 30s
+  scrape_timeout: 10s
+
+scrape_configs:
+  - job_name: wgkeeper
+    bearer_token_file: /etc/prometheus/wgkeeper-token
+    static_configs:
+      - targets: ["wireguard:9090"]
+    # Uncomment when wgkeeper exposes /metrics over TLS:
+    # scheme: https
+    # tls_config:
+    #   ca_file: /etc/prometheus/ca.pem
+    #   insecure_skip_verify: false
