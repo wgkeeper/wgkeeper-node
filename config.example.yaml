@@ -35,3 +35,17 @@ wireguard:
 # metrics:
 #   port: 9090
 #   token: "REPLACE_WITH_32+_RANDOM_CHARS"
+#
+#   # Optional: per-peer metrics (rx/tx, last handshake age) labelled by
+#   # peer_id and allowed_ip. Off by default — they expand cardinality with
+#   # peer count. Cap is applied as top-N by recent traffic; quieter peers
+#   # fall out of metrics but remain visible via the REST API.
+#   #
+#   # Recommended caps (see README → Metrics → Cardinality):
+#   #   <500 peers   → 500
+#   #   500-2000     → 200
+#   #   2000-10000   → 100  (default)
+#   #   10000+       → 50
+#   #   50000+       → keep per_peer disabled, drill down via REST API
+#   per_peer: false
+#   per_peer_max: 100

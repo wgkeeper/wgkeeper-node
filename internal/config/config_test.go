@@ -767,6 +767,86 @@ metrics:
 	}
 }
 
+func TestLoadConfigMetricsPerPeerDefaultsApplied(t *testing.T) {
+	path := writeConfigFile(t, baseConfigForMetrics+`
+metrics:
+  port: 9090
+  token: "metrics-bearer-token-32chars-min!"
+  per_peer: true
+`)
+	t.Setenv("NODE_CONFIG", path)
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf(msgExpectedNoError, err)
+	}
+	if !cfg.MetricsPerPeer {
+		t.Error("expected MetricsPerPeer=true")
+	}
+	if cfg.MetricsPerPeerMax != defaultMetricsPerPeerMax {
+		t.Errorf("expected default cap %d, got %d", defaultMetricsPerPeerMax, cfg.MetricsPerPeerMax)
+	}
+}
+
+func TestLoadConfigMetricsPerPeerExplicitMax(t *testing.T) {
+	path := writeConfigFile(t, baseConfigForMetrics+`
+metrics:
+  port: 9090
+  token: "metrics-bearer-token-32chars-min!"
+  per_peer: true
+  per_peer_max: 500
+`)
+	t.Setenv("NODE_CONFIG", path)
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf(msgExpectedNoError, err)
+	}
+	if cfg.MetricsPerPeerMax != 500 {
+		t.Errorf("expected cap 500, got %d", cfg.MetricsPerPeerMax)
+	}
+}
+
+func TestLoadConfigMetricsPerPeerMaxOutOfRange(t *testing.T) {
+	for _, v := range []int{-1, maxMetricsPerPeerMax + 1} {
+		path := writeConfigFile(t, baseConfigForMetrics+`
+metrics:
+  port: 9090
+  token: "metrics-bearer-token-32chars-min!"
+  per_peer: true
+  per_peer_max: `+itoa(v)+`
+`)
+		t.Setenv("NODE_CONFIG", path)
+		if _, err := LoadConfig(); err == nil {
+			t.Errorf("expected error for per_peer_max=%d", v)
+		}
+	}
+}
+
+func TestLoadConfigMetricsPerPeerOffWhenDisabled(t *testing.T) {
+	// per_peer is ignored when metrics endpoint is off.
+	path := writeConfigFile(t, baseConfigForMetrics+`
+metrics:
+  per_peer: true
+  per_peer_max: 500
+`)
+	t.Setenv("NODE_CONFIG", path)
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf(msgExpectedNoError, err)
+	}
+	if cfg.MetricsEnabled() {
+		t.Error("metrics should be disabled (port=0)")
+	}
+	if cfg.MetricsPerPeer {
+		t.Error("MetricsPerPeer must be false when metrics endpoint is off")
+	}
+	if cfg.MetricsPerPeerMax != 0 {
+		t.Errorf("MetricsPerPeerMax must be 0 when disabled, got %d", cfg.MetricsPerPeerMax)
+	}
+}
+
 func TestLoadConfigMetricsInvalidPort(t *testing.T) {
 	for _, port := range []int{-1, 65536, 70000} {
 		t.Run("port", func(t *testing.T) {

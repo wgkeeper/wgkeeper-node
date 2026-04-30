@@ -88,6 +88,10 @@ func main() {
 		wgService.SetRollbackObserver(metricsBundle)
 		metricsBundle.BindPeersProvider(peerSnapshotAdapter{svc: wgService})
 		metricsBundle.BindWireGuardProvider(wgSnapshotAdapter{svc: wgService})
+		if cfg.MetricsPerPeer {
+			metricsBundle.BindPerPeerProvider(perPeerSnapshotAdapter{svc: wgService}, cfg.MetricsPerPeerMax)
+			slog.Info("per-peer metrics enabled", "cap", cfg.MetricsPerPeerMax)
+		}
 		metricsSrv := metrics.NewServer(cfg.MetricsAddr(), cfg.MetricsToken, metricsBundle)
 		slog.Info("metrics enabled", "addr", cfg.MetricsAddr())
 		go func() {
@@ -171,6 +175,31 @@ func (a wgSnapshotAdapter) WireGuardSnapshot() (metrics.WireGuardSnapshot, error
 		TransmitBytesTotal: s.TransmitBytesTotal,
 		StalePeers:         s.StalePeers,
 	}, nil
+}
+
+// perPeerSnapshotAdapter bridges WireGuardService.PeersSnapshot() to the
+// metrics package's PerPeerProvider. Same decoupling pattern as the other
+// adapters — wireguard package never imports metrics.
+type perPeerSnapshotAdapter struct {
+	svc *wireguard.WireGuardService
+}
+
+func (a perPeerSnapshotAdapter) PeersSnapshot() ([]metrics.PeerSnapshot, error) {
+	src, err := a.svc.PeersSnapshot()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]metrics.PeerSnapshot, len(src))
+	for i, p := range src {
+		out[i] = metrics.PeerSnapshot{
+			PeerID:                  p.PeerID,
+			AllowedIP:               p.AllowedIP,
+			ReceiveBytes:            p.ReceiveBytes,
+			TransmitBytes:           p.TransmitBytes,
+			LastHandshakeAgeSeconds: p.LastHandshakeAgeSeconds,
+		}
+	}
+	return out, nil
 }
 
 func setupGinMode(debug bool) {
