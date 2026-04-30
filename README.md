@@ -154,7 +154,7 @@ Suitable for local use and simple setups. Uses `docker-compose.local.yml`.
    docker compose -f docker-compose.local.yml up -d
    ```
 
-The compose file uses `ghcr.io/wgkeeper/node:1.2.0` (or `edge` for the latest `main` build), with `NET_ADMIN` + `SYS_MODULE` capabilities, volumes for `config.yaml` and `./wireguard`, and ports `51820/udp` and `51821`. IPv4/IPv6 forwarding sysctls and an IPv6-capable network are preconfigured; adjust as needed for your environment.
+The compose file uses `ghcr.io/wgkeeper/node:1.3.0` (or `edge` for the latest `main` build), with `NET_ADMIN` + `SYS_MODULE` capabilities, volumes for `config.yaml` and `./wireguard`, and ports `51820/udp` and `51821`. IPv4/IPv6 forwarding sysctls and an IPv6-capable network are preconfigured; adjust as needed for your environment.
 
 ### Docker Compose — production with Caddy
 
