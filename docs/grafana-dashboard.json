@@ -78,20 +78,6 @@
         "multi": false,
         "label": "Instance",
         "description": "Sources from `up` so a DOWN node is still selectable \u2014 otherwise the dropdown would be empty and the operator would not see the outage."
-      },
-      {
-        "name": "peer_id",
-        "type": "query",
-        "datasource": {
-          "type": "prometheus",
-          "uid": "${DS_PROMETHEUS}"
-        },
-        "query": "label_values(wgkeeper_peer_rx_bytes_total{instance=\"$instance\"}, peer_id)",
-        "refresh": 2,
-        "includeAll": false,
-        "multi": false,
-        "label": "Drill-down peer",
-        "hide": 0
       }
     ]
   },
@@ -1129,8 +1115,8 @@
     {
       "id": 70,
       "type": "table",
-      "title": "Top peers by rate",
-      "description": "Top-N peers ranked by current scrape-window traffic (rx + tx). Empty when metrics.per_peer is off.",
+      "title": "Top peers by total traffic",
+      "description": "Top peers ranked by total bytes since interface bring-up. Click any row to drill down to per-peer rate history in Prometheus Explore.",
       "gridPos": {
         "h": 10,
         "w": 16,
@@ -1147,9 +1133,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "topk(20, rate(wgkeeper_peer_rx_bytes_total{instance=\"$instance\"}[$__rate_interval]) * 8)",
-          "legendFormat": "{{peer_id}}",
-          "refId": "rx",
+          "expr": "topk(20, wgkeeper_peer_rx_bytes_total{instance=\"$instance\"})",
+          "refId": "rxtot",
           "format": "table",
           "instant": true
         },
@@ -1158,20 +1143,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "topk(20, rate(wgkeeper_peer_tx_bytes_total{instance=\"$instance\"}[$__rate_interval]) * 8)",
-          "legendFormat": "{{peer_id}}",
-          "refId": "tx",
-          "format": "table",
-          "instant": true
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "expr": "wgkeeper_peer_last_handshake_seconds{instance=\"$instance\"}",
-          "legendFormat": "{{peer_id}}",
-          "refId": "hs",
+          "expr": "wgkeeper_peer_tx_bytes_total{instance=\"$instance\"}",
+          "refId": "txtot",
           "format": "table",
           "instant": true
         }
@@ -1182,62 +1155,91 @@
           "options": {}
         },
         {
+          "id": "groupBy",
+          "options": {
+            "fields": {
+              "peer_id": {
+                "operation": "groupby"
+              },
+              "allowed_ip": {
+                "operation": "aggregate",
+                "aggregations": [
+                  "lastNotNull"
+                ]
+              },
+              "Value #rxtot": {
+                "operation": "aggregate",
+                "aggregations": [
+                  "lastNotNull"
+                ]
+              },
+              "Value #txtot": {
+                "operation": "aggregate",
+                "aggregations": [
+                  "lastNotNull"
+                ]
+              }
+            }
+          }
+        },
+        {
           "id": "organize",
           "options": {
-            "excludeByName": {
-              "Time": true,
-              "job": true,
-              "__name__": true,
-              "instance": true
-            },
+            "excludeByName": {},
             "renameByName": {
               "peer_id": "Peer ID",
-              "allowed_ip": "IP",
-              "Value #rx": "RX bps",
-              "Value #tx": "TX bps",
-              "Value #hs": "HS age (s)"
+              "allowed_ip (lastNotNull)": "IP",
+              "Value #rxtot (lastNotNull)": "RX total",
+              "Value #txtot (lastNotNull)": "TX total"
             }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [
+              {
+                "field": "RX total",
+                "desc": true
+              }
+            ]
           }
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "short",
+          "links": [
+            {
+              "title": "Drill down: peer history",
+              "url": "/explore?left=%7B%22datasource%22%3A%22${DS_PROMETHEUS}%22%2C%22queries%22%3A%5B%7B%22expr%22%3A%22rate(wgkeeper_peer_rx_bytes_total%7Bpeer_id%3D%5C%22${__data.fields.Peer ID}%5C%22%7D%5B5m%5D)*8%22%7D%5D%7D",
+              "targetBlank": true
+            }
+          ]
         },
         "overrides": [
           {
             "matcher": {
               "id": "byName",
-              "options": "RX bps"
+              "options": "RX total"
             },
             "properties": [
               {
                 "id": "unit",
-                "value": "bps"
+                "value": "bytes"
               }
             ]
           },
           {
             "matcher": {
               "id": "byName",
-              "options": "TX bps"
+              "options": "TX total"
             },
             "properties": [
               {
                 "id": "unit",
-                "value": "bps"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "HS age (s)"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "s"
+                "value": "bytes"
               }
             ]
           }
@@ -1256,7 +1258,7 @@
       "title": "Peers capped",
       "description": "Number of peers excluded from per-peer metrics by the per_peer_max cap. Non-zero means the cap is binding \u2014 operator may need to raise it or accept that quiet peers are invisible to per-peer metrics.",
       "gridPos": {
-        "h": 5,
+        "h": 10,
         "w": 8,
         "x": 16,
         "y": 47
@@ -1300,63 +1302,6 @@
           "calcs": [
             "lastNotNull"
           ]
-        }
-      }
-    },
-    {
-      "id": 72,
-      "type": "timeseries",
-      "title": "Drill-down: $peer_id traffic",
-      "description": "Per-peer rx/tx for the peer chosen in the variable dropdown. Useful for reading individual client patterns.",
-      "gridPos": {
-        "h": 5,
-        "w": 8,
-        "x": 16,
-        "y": 52
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "expr": "rate(wgkeeper_peer_rx_bytes_total{instance=\"$instance\",peer_id=\"$peer_id\"}[$__rate_interval]) * 8",
-          "legendFormat": "rx",
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "expr": "rate(wgkeeper_peer_tx_bytes_total{instance=\"$instance\",peer_id=\"$peer_id\"}[$__rate_interval]) * 8",
-          "legendFormat": "tx",
-          "refId": "B"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "bps",
-          "min": 0,
-          "custom": {
-            "fillOpacity": 10,
-            "lineWidth": 2,
-            "showPoints": "never"
-          }
-        }
-      },
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom"
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
         }
       }
     },
