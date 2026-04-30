@@ -135,7 +135,7 @@ func BenchmarkDeletePeer(b *testing.B) {
 	svc.store.Set(rec)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if err := svc.DeletePeer(benchPeerID); err != nil {
+		if _, err := svc.DeletePeer(benchPeerID); err != nil {
 			b.Fatal(err)
 		}
 		b.StopTimer()

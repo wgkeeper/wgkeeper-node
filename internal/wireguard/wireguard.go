@@ -49,6 +49,10 @@ type PeerInfo struct {
 	PresharedKey    string
 	AllowedIPs      []string // one per family (e.g. ["10.0.0.2/32", "fd00::2/128"])
 	AddressFamilies []string // e.g. ["IPv4", "IPv6"] — what this peer has
+	// Rotated is true when EnsurePeer rotated keys for an existing peer rather
+	// than creating a fresh one. Used by HTTP handlers for audit logging only;
+	// not surfaced in JSON responses.
+	Rotated bool
 }
 
 type WireGuardService struct {
@@ -223,9 +227,13 @@ func initPersistStore(svc *WireGuardService) error {
 	return nil
 }
 
-// reconcileStoreWithDevice restores the device from the store: adds to the device any peer
-// that is in the store but not present on the device (e.g. after a reboot).
-// Store is the source of truth; we do not remove from store when a peer is missing on the device.
+// reconcileStoreWithDevice synchronises the device with the store at startup.
+// The store is the source of truth: peers in the store but not on the device
+// are added (e.g. after a reboot), and peers on the device whose public keys
+// are not in the store are removed (orphans from a crash mid-write or manual
+// `wg set` calls). Without the latter direction, a crash window between
+// configureDevice and PersistPut leaves an unmanaged peer on the device that
+// is invisible to the store and can collide with future allocations.
 func (s *WireGuardService) reconcileStoreWithDevice() error {
 	device, err := s.deviceWithTimeout()
 	if err != nil {
@@ -235,8 +243,10 @@ func (s *WireGuardService) reconcileStoreWithDevice() error {
 	for i := range device.Peers {
 		onDevice[device.Peers[i].PublicKey] = true
 	}
+	inStore := make(map[wgtypes.Key]bool)
 	var toAdd []wgtypes.PeerConfig
 	s.store.ForEach(func(rec PeerRecord) {
+		inStore[rec.PublicKey] = true
 		if !onDevice[rec.PublicKey] {
 			psk := rec.PresharedKey
 			toAdd = append(toAdd, wgtypes.PeerConfig{
@@ -248,10 +258,22 @@ func (s *WireGuardService) reconcileStoreWithDevice() error {
 			})
 		}
 	})
-	if len(toAdd) == 0 {
+	var toRemove []wgtypes.PeerConfig
+	for i := range device.Peers {
+		if !inStore[device.Peers[i].PublicKey] {
+			slog.Warn("reconcile: removing orphan peer from device",
+				"publicKey", device.Peers[i].PublicKey.String())
+			toRemove = append(toRemove, wgtypes.PeerConfig{
+				PublicKey: device.Peers[i].PublicKey,
+				Remove:    true,
+			})
+		}
+	}
+	peers := append(toAdd, toRemove...)
+	if len(peers) == 0 {
 		return nil
 	}
-	return s.configureDevice(wgtypes.Config{Peers: toAdd})
+	return s.configureDevice(wgtypes.Config{Peers: peers})
 }
 
 // reconcileStoreWithSubnets removes from store and from the device any record whose allowed_ips
@@ -427,62 +449,52 @@ func (s *WireGuardService) ValidateAddressFamilies(requested []string) ([]string
 	return out, nil
 }
 
+// EnsurePeer creates a new peer or rotates keys for an existing one.
+//
+// Persistence is write-ahead: the new record is written to bbolt BEFORE the
+// device is mutated. If the device write fails, the persist is rolled back so
+// device, in-memory store, and bbolt converge to the pre-call state. If the
+// process crashes between persist and configureDevice, startup reconcile
+// restores the device from the store. This eliminates the classic
+// "device-changed but bbolt-not-yet" window where a crash would either lose a
+// peer (new peer case) or strand a client on a now-unrecoverable private key
+// (rotation case).
+//
+// Everything runs under s.mu, including the bbolt I/O. Peer create/rotate is
+// rare (orchestrator-driven, not data-path), so holding the lock through a
+// short fsync is the right trade-off for correctness.
 func (s *WireGuardService) EnsurePeer(peerID string, expiresAt *time.Time, addressFamilies []string) (PeerInfo, error) {
-	// doEnsurePeer releases s.mu before returning, so PersistPut runs outside
-	// the lock and does not block concurrent store reads.
-	info, rec, err := s.doEnsurePeer(peerID, expiresAt, addressFamilies)
-	if err != nil {
-		return PeerInfo{}, err
-	}
-	if err := s.store.PersistPutIfPresent(rec); err != nil {
-		return PeerInfo{}, fmt.Errorf(errSavePeerStoreFmt, err)
-	}
-	return info, nil
-}
-
-// doEnsurePeer performs all in-memory and device mutations under s.mu.
-// It does not persist; the caller must call PersistPut after releasing the lock.
-func (s *WireGuardService) doEnsurePeer(peerID string, expiresAt *time.Time, addressFamilies []string) (PeerInfo, PeerRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if record, ok := s.store.Get(peerID); ok {
 		return s.rotatePeer(peerID, record, expiresAt)
 	}
+	return s.createPeer(peerID, expiresAt, addressFamilies)
+}
 
+// createPeer adds a brand-new peer. Must be called with s.mu held.
+func (s *WireGuardService) createPeer(peerID string, expiresAt *time.Time, addressFamilies []string) (PeerInfo, error) {
 	families, err := s.ValidateAddressFamilies(addressFamilies)
 	if err != nil {
-		return PeerInfo{}, PeerRecord{}, err
+		return PeerInfo{}, err
 	}
 
 	allowedIPs, err := s.allocateIPs(families)
 	if err != nil {
-		return PeerInfo{}, PeerRecord{}, err
+		return PeerInfo{}, err
 	}
 
 	privateKey, err := wgtypes.GeneratePrivateKey()
 	if err != nil {
-		return PeerInfo{}, PeerRecord{}, err
+		s.releaseAllocatedIPs(allowedIPs)
+		return PeerInfo{}, err
 	}
-
 	publicKey := privateKey.PublicKey()
 	presharedKey, err := wgtypes.GenerateKey()
 	if err != nil {
-		return PeerInfo{}, PeerRecord{}, err
-	}
-	peerConfig := wgtypes.PeerConfig{
-		PublicKey:                   publicKey,
-		PresharedKey:                &presharedKey,
-		AllowedIPs:                  allowedIPs,
-		ReplaceAllowedIPs:           true,
-		PersistentKeepaliveInterval: keepaliveInterval(),
-	}
-
-	if err := s.configureDevice(wgtypes.Config{Peers: []wgtypes.PeerConfig{peerConfig}}); err != nil {
-		for _, aip := range allowedIPs {
-			delete(s.usedIPs, aip.IP.String())
-		}
-		return PeerInfo{}, PeerRecord{}, err
+		s.releaseAllocatedIPs(allowedIPs)
+		return PeerInfo{}, err
 	}
 
 	rec := PeerRecord{
@@ -493,6 +505,34 @@ func (s *WireGuardService) doEnsurePeer(peerID string, expiresAt *time.Time, add
 		CreatedAt:    time.Now().UTC(),
 		ExpiresAt:    expiresAt,
 	}
+
+	// Write-ahead persist: bbolt is updated before the device. If this fails,
+	// nothing has changed yet — return the error and free the reserved IP.
+	if err := s.store.PersistPut(rec); err != nil {
+		s.releaseAllocatedIPs(allowedIPs)
+		return PeerInfo{}, fmt.Errorf(errSavePeerStoreFmt, err)
+	}
+
+	peerConfig := wgtypes.PeerConfig{
+		PublicKey:                   publicKey,
+		PresharedKey:                &presharedKey,
+		AllowedIPs:                  allowedIPs,
+		ReplaceAllowedIPs:           true,
+		PersistentKeepaliveInterval: keepaliveInterval(),
+	}
+	if err := s.configureDevice(wgtypes.Config{Peers: []wgtypes.PeerConfig{peerConfig}}); err != nil {
+		// Rollback persist (best-effort). On rollback failure the peer remains
+		// in bbolt as an orphan; startup reconcile will install it on the
+		// device next time and it becomes a normal (unused) peer the operator
+		// can delete via the API.
+		if rbErr := s.store.PersistDeleteBatch(peerID); rbErr != nil {
+			slog.Error("rollback persist after configureDevice failure",
+				"peerId", peerID, "rollback_error", rbErr, "device_error", err)
+		}
+		s.releaseAllocatedIPs(allowedIPs)
+		return PeerInfo{}, err
+	}
+
 	s.store.Set(rec)
 
 	allowedIPsStr := make([]string, len(allowedIPs))
@@ -506,7 +546,17 @@ func (s *WireGuardService) doEnsurePeer(peerID string, expiresAt *time.Time, add
 		PresharedKey:    presharedKey.String(),
 		AllowedIPs:      allowedIPsStr,
 		AddressFamilies: families,
-	}, rec, nil
+		Rotated:         false,
+	}, nil
+}
+
+// releaseAllocatedIPs frees IPs from the usedIPs cache after a failed allocation
+// attempt. Must be called with s.mu held.
+func (s *WireGuardService) releaseAllocatedIPs(ips []net.IPNet) {
+	for _, aip := range ips {
+		delete(s.usedIPs, aip.IP.String())
+		s.retractAllocHint(aip.IP)
+	}
 }
 
 func (s *WireGuardService) ServerInfo() (string, int, error) {
@@ -517,14 +567,19 @@ func (s *WireGuardService) ServerInfo() (string, int, error) {
 	return device.PublicKey.String(), device.ListenPort, nil
 }
 
-func (s *WireGuardService) DeletePeer(peerID string) error {
-	if err := s.doDeletePeer(peerID); err != nil {
-		return err
+// DeletePeer removes a peer and returns the AllowedIPs that were freed (for
+// audit logging). On persist failure the peer remains absent in memory and on
+// the device but present in bbolt; the next startup reconcile re-installs it.
+// Operators should retry the delete or remove the bbolt record manually.
+func (s *WireGuardService) DeletePeer(peerID string) ([]string, error) {
+	allowedIPs, err := s.doDeletePeer(peerID)
+	if err != nil {
+		return nil, err
 	}
 	if err := s.store.PersistDeleteBatch(peerID); err != nil {
-		return fmt.Errorf(errSavePeerStoreFmt, err)
+		return nil, fmt.Errorf(errSavePeerStoreFmt, err)
 	}
-	return nil
+	return allowedIPs, nil
 }
 
 // removePeerUnsafe removes a peer from the WireGuard device, store, and usedIPs cache.
@@ -563,17 +618,25 @@ func (s *WireGuardService) retractAllocHint(ip net.IP) {
 	}
 }
 
-// doDeletePeer performs all in-memory and device mutations under s.mu.
-// It does not persist; the caller must call PersistDeleteBatch after releasing the lock.
-func (s *WireGuardService) doDeletePeer(peerID string) error {
+// doDeletePeer performs all in-memory and device mutations under s.mu and
+// returns the AllowedIPs that were freed. The caller persists the deletion
+// after releasing the lock.
+func (s *WireGuardService) doDeletePeer(peerID string) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	record, ok := s.store.Get(peerID)
 	if !ok {
-		return ErrPeerNotFound
+		return nil, ErrPeerNotFound
 	}
-	return s.removePeerUnsafe(record)
+	if err := s.removePeerUnsafe(record); err != nil {
+		return nil, err
+	}
+	out := make([]string, len(record.AllowedIPs))
+	for i := range record.AllowedIPs {
+		out[i] = record.AllowedIPs[i].String()
+	}
+	return out, nil
 }
 
 func (s *WireGuardService) Stats() (Stats, error) {
@@ -724,38 +787,29 @@ func appendIfNotPresent(slice []string, v string) []string {
 	return append(slice, v)
 }
 
-func (s *WireGuardService) rotatePeer(peerID string, record PeerRecord, expiresAt *time.Time) (PeerInfo, PeerRecord, error) {
+// rotatePeer rotates keys for an existing peer using write-ahead persist.
+// Must be called with s.mu held.
+//
+// Order: generate new keys → persist new record → configureDevice (atomic
+// remove-old + add-new) → in-memory store.Set. If configureDevice fails the
+// persist is rolled back to the original record. If the process crashes between
+// persist and configureDevice, startup reconcile installs the new key on the
+// device — the client (which already received the new private key) keeps
+// working. This avoids the previous failure mode where a crash after a
+// successful configureDevice but before persist would, on restart, restore the
+// OLD key from bbolt and permanently lock out the client holding the new
+// private key.
+func (s *WireGuardService) rotatePeer(peerID string, record PeerRecord, expiresAt *time.Time) (PeerInfo, error) {
 	privateKey, err := wgtypes.GeneratePrivateKey()
 	if err != nil {
-		return PeerInfo{}, PeerRecord{}, err
+		return PeerInfo{}, err
 	}
-
 	publicKey := privateKey.PublicKey()
 	presharedKey, err := wgtypes.GenerateKey()
 	if err != nil {
-		return PeerInfo{}, PeerRecord{}, err
-	}
-	config := wgtypes.Config{
-		Peers: []wgtypes.PeerConfig{
-			{
-				PublicKey: record.PublicKey,
-				Remove:    true,
-			},
-			{
-				PublicKey:                   publicKey,
-				PresharedKey:                &presharedKey,
-				AllowedIPs:                  record.AllowedIPs,
-				ReplaceAllowedIPs:           true,
-				PersistentKeepaliveInterval: keepaliveInterval(),
-			},
-		},
+		return PeerInfo{}, err
 	}
 
-	if err := s.configureDevice(config); err != nil {
-		return PeerInfo{}, PeerRecord{}, err
-	}
-
-	// Use new expiresAt if provided, otherwise keep existing.
 	effectiveExpiresAt := expiresAt
 	if effectiveExpiresAt == nil {
 		effectiveExpiresAt = record.ExpiresAt
@@ -768,9 +822,38 @@ func (s *WireGuardService) rotatePeer(peerID string, record PeerRecord, expiresA
 		CreatedAt:    record.CreatedAt,
 		ExpiresAt:    effectiveExpiresAt,
 	}
+
+	// Write-ahead persist: replace the bbolt record with the new keys before
+	// touching the device. If this fails, nothing has changed.
+	if err := s.store.PersistPut(newRec); err != nil {
+		return PeerInfo{}, fmt.Errorf(errSavePeerStoreFmt, err)
+	}
+
+	config := wgtypes.Config{
+		Peers: []wgtypes.PeerConfig{
+			{PublicKey: record.PublicKey, Remove: true},
+			{
+				PublicKey:                   publicKey,
+				PresharedKey:                &presharedKey,
+				AllowedIPs:                  record.AllowedIPs,
+				ReplaceAllowedIPs:           true,
+				PersistentKeepaliveInterval: keepaliveInterval(),
+			},
+		},
+	}
+	if err := s.configureDevice(config); err != nil {
+		// Rollback persist to the old record. Best-effort: on rollback failure
+		// bbolt holds the new key while the device still has the old one.
+		// Startup reconcile will then install the new key — orphaning the old
+		// peer on the device is impossible because we did not configureDevice.
+		if rbErr := s.store.PersistPut(record); rbErr != nil {
+			slog.Error("rollback persist after rotation failure",
+				"peerId", peerID, "rollback_error", rbErr, "device_error", err)
+		}
+		return PeerInfo{}, err
+	}
+
 	s.store.Set(newRec)
-	// PersistPut is intentionally omitted here; EnsurePeer calls it after
-	// releasing s.mu so disk I/O does not block concurrent store reads.
 
 	allowedIPsStr := make([]string, len(record.AllowedIPs))
 	peerFamilies := make([]string, 0, 2)
@@ -789,7 +872,8 @@ func (s *WireGuardService) rotatePeer(peerID string, record PeerRecord, expiresA
 		PresharedKey:    presharedKey.String(),
 		AllowedIPs:      allowedIPsStr,
 		AddressFamilies: peerFamilies,
-	}, newRec, nil
+		Rotated:         true,
+	}, nil
 }
 
 // initUsedIPs builds the usedIPs cache from the current store and server IPs.

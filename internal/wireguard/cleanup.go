@@ -58,21 +58,37 @@ func (s *WireGuardService) cleanupExpiredPeers() {
 	if len(deleted) == 0 {
 		return
 	}
-	if err := s.store.PersistDeleteBatch(deleted...); err != nil {
-		slog.Error("cleanup: save peer store", "error", err)
+	deletedIDs := make([]string, len(deleted))
+	for i, d := range deleted {
+		deletedIDs[i] = d.peerID
 	}
-	for _, peerID := range deleted {
-		slog.Info("expired peer removed", "peerId", peerID)
+	if err := s.store.PersistDeleteBatch(deletedIDs...); err != nil {
+		slog.Error("cleanup: save peer store", "error", err, "peerIds", deletedIDs)
 	}
+	for _, d := range deleted {
+		slog.Info("audit.peer_expired",
+			"peerId", d.peerID,
+			"publicKey", d.publicKey,
+			"allowedIPs", d.allowedIPs,
+		)
+	}
+}
+
+// expiredPeerInfo carries audit data for a peer removed by cleanup.
+type expiredPeerInfo struct {
+	peerID     string
+	publicKey  string
+	allowedIPs []string
 }
 
 // doCleanupBatch re-checks each candidate under s.mu, removes all still-expired
 // peers from the device in one configureDevice call, and updates the store and
-// usedIPs cache. Returns the list of peer IDs that were successfully removed.
+// usedIPs cache. Returns the audit data for peers that were successfully
+// removed.
 //
 // Re-checking under the lock prevents a race with a concurrent EnsurePeer that
 // extends a peer's expiry between the ForEach snapshot and this call.
-func (s *WireGuardService) doCleanupBatch(candidates []string, now time.Time) ([]string, error) {
+func (s *WireGuardService) doCleanupBatch(candidates []string, now time.Time) ([]expiredPeerInfo, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -101,14 +117,20 @@ func (s *WireGuardService) doCleanupBatch(candidates []string, now time.Time) ([
 	}
 
 	// Update store and IP cache after successful device operation.
-	deleted := make([]string, 0, len(toRemove))
+	deleted := make([]expiredPeerInfo, 0, len(toRemove))
 	for _, rec := range toRemove {
 		s.store.Delete(rec.PeerID)
-		for _, aip := range rec.AllowedIPs {
+		ips := make([]string, len(rec.AllowedIPs))
+		for i, aip := range rec.AllowedIPs {
+			ips[i] = aip.String()
 			delete(s.usedIPs, aip.IP.String())
 			s.retractAllocHint(aip.IP)
 		}
-		deleted = append(deleted, rec.PeerID)
+		deleted = append(deleted, expiredPeerInfo{
+			peerID:     rec.PeerID,
+			publicKey:  rec.PublicKey.String(),
+			allowedIPs: ips,
+		})
 	}
 	return deleted, nil
 }

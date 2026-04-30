@@ -10,12 +10,12 @@ pre-commit:
 pre-push:
   commands:
     golangci-lint:
-      run: golangci-lint run
+      run: "$(go env GOPATH)/bin/golangci-lint run"
     tests:
       run: go test ./...
     build:
       run: go build -o /dev/null ./...
     govulncheck:
-      run: govulncheck ./...
+      run: "$(go env GOPATH)/bin/govulncheck ./..."
     mod-tidy:
       run: go mod tidy && git diff --exit-code go.mod go.sum

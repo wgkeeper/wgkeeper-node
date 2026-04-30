@@ -228,10 +228,15 @@ func (s *PeerStore) ListPaginated(offset, limit int) ([]PeerRecord, int) {
 	return records, total
 }
 
+// boltOpenTimeout caps how long bolt.Open will wait on the file lock before
+// returning an error. Without it, a stale lock from a zombie process makes the
+// service hang on startup with no diagnostic.
+const boltOpenTimeout = 5 * time.Second
+
 // OpenFile opens (or creates) the bbolt DB at path, loads all peer records into
 // memory, and keeps the DB open for incremental persistence. Call Close when done.
 func (s *PeerStore) OpenFile(path string) error {
-	db, err := bolt.Open(path, 0o600, nil)
+	db, err := bolt.Open(path, 0o600, &bolt.Options{Timeout: boltOpenTimeout})
 	if err != nil {
 		return err
 	}
@@ -275,26 +280,6 @@ func (s *PeerStore) PersistPut(record PeerRecord) error {
 	s.saveMu.Lock()
 	defer s.saveMu.Unlock()
 	if s.db == nil {
-		return nil
-	}
-	return s.persistPutLocked(record)
-}
-
-// PersistPutIfPresent writes a peer record to the open DB only when the peer
-// is still in the in-memory store with the same public key. This prevents a
-// stale write when a concurrent DeletePeer removes the peer between
-// doEnsurePeer (which releases s.mu) and the caller's persist step.
-// No-op if no DB is open.
-func (s *PeerStore) PersistPutIfPresent(record PeerRecord) error {
-	s.saveMu.Lock()
-	defer s.saveMu.Unlock()
-	if s.db == nil {
-		return nil
-	}
-	s.mu.RLock()
-	current, ok := s.peers[record.PeerID]
-	s.mu.RUnlock()
-	if !ok || current.PublicKey != record.PublicKey {
 		return nil
 	}
 	return s.persistPutLocked(record)

@@ -733,95 +733,23 @@ func mustTime(ts string) time.Time {
 	return t
 }
 
-// TestPersistPutIfPresentSkipsWhenKeyChanged verifies that PersistPutIfPresent
-// does not write to DB when the peer's public key in the store differs from the
-// record being persisted (simulates two concurrent EnsurePeer rotations where
-// the second rotation wins and the first must not overwrite the newer record).
-func TestPersistPutIfPresentSkipsWhenKeyChanged(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, testPeersFile)
-	key1, _ := wgtypes.GenerateKey()
-	key2, _ := wgtypes.GenerateKey()
-	psk, _ := wgtypes.GenerateKey()
-	ipNet := mustParseCIDRs(t, testAllowedIP)
-
+// TestPersistPutNoopWhenNoDB verifies persist methods are safe when no DB is
+// open (in-memory only mode).
+func TestPersistPutNoopOnInMemoryStore(t *testing.T) {
 	store := NewPeerStore()
-	if err := store.OpenFile(path); err != nil {
-		t.Fatalf(errOpenFileFmt, err)
-	}
-
-	// Store has the peer with key2 (second rotation won).
-	store.Set(PeerRecord{
-		PeerID:       testPeerIDRotate,
-		PublicKey:    key2,
-		PresharedKey: psk,
-		AllowedIPs:   ipNet,
-		CreatedAt:    time.Now().UTC(),
-	})
-
-	// PersistPutIfPresent is called with the stale record (key1 from first rotation).
-	stale := PeerRecord{
-		PeerID:       testPeerIDRotate,
-		PublicKey:    key1,
-		PresharedKey: psk,
-		AllowedIPs:   ipNet,
-		CreatedAt:    time.Now().UTC(),
-	}
-	if err := store.PersistPutIfPresent(stale); err != nil {
-		t.Fatalf("PersistPutIfPresent: %v", err)
-	}
-	store.Close()
-
-	// Reopen: DB must not contain the stale key1 record.
-	store2 := NewPeerStore()
-	if err := store2.OpenFile(path); err != nil {
-		t.Fatalf(errOpenFileReloadFmt, err)
-	}
-	defer store2.Close()
-	if got, ok := store2.Get(testPeerIDRotate); ok && got.PublicKey == key1 {
-		t.Fatal("stale key1 record must not be written to DB by PersistPutIfPresent")
-	}
-}
-
-// TestPersistPutIfPresentSkipsWhenDeleted verifies that PersistPutIfPresent
-// does not write to DB when the peer has been removed from the in-memory store
-// (simulates a concurrent DeletePeer racing with EnsurePeer's persist step).
-func TestPersistPutIfPresentSkipsWhenDeleted(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, testPeersFile)
 	key, _ := wgtypes.GenerateKey()
 	psk, _ := wgtypes.GenerateKey()
 	rec := PeerRecord{
-		PeerID:       "race-peer",
+		PeerID:       "no-db",
 		PublicKey:    key,
 		PresharedKey: psk,
 		AllowedIPs:   mustParseCIDRs(t, testAllowedIP),
 		CreatedAt:    time.Now().UTC(),
 	}
-
-	store := NewPeerStore()
-	if err := store.OpenFile(path); err != nil {
-		t.Fatalf(errOpenFileFmt, err)
+	if err := store.PersistPut(rec); err != nil {
+		t.Fatalf("PersistPut: %v", err)
 	}
-
-	// Peer is added to store (simulates doEnsurePeer completing) then
-	// immediately deleted (simulates concurrent DeletePeer winning the race).
-	store.Set(rec)
-	store.Delete(rec.PeerID)
-
-	// PersistPutIfPresent must be a no-op: peer is gone from the store.
-	if err := store.PersistPutIfPresent(rec); err != nil {
-		t.Fatalf("PersistPutIfPresent: %v", err)
-	}
-	store.Close()
-
-	// Reopen and verify the record was NOT written to DB.
-	store2 := NewPeerStore()
-	if err := store2.OpenFile(path); err != nil {
-		t.Fatalf(errOpenFileReloadFmt, err)
-	}
-	defer store2.Close()
-	if _, ok := store2.Get("race-peer"); ok {
-		t.Fatal("peer should not be in DB after PersistPutIfPresent skipped write")
+	if err := store.PersistDeleteBatch("no-db"); err != nil {
+		t.Fatalf("PersistDeleteBatch: %v", err)
 	}
 }
