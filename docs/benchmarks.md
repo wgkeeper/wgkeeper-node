@@ -1,7 +1,7 @@
 # Benchmark Snapshot
 
-Date: 2026-04-06
-Host: darwin arm64  
+Date: 2026-04-30
+Host: darwin arm64 (Apple M2 Pro)  
 Go packages: `./internal/wireguard ./internal/server`  
 Command:
 
@@ -51,10 +51,11 @@ Values below use the median of 3 runs for readability.
 ## Quick Interpretation
 
 - `PeerStore` is very fast and allocation-free on core `Get` and `Set` paths.
-- `PersistPut` (~11.5 ms) is dominated by bbolt's fsync-per-commit guarantee — this is the cost of durability, not code overhead. In-memory operations are unaffected.
-- `OpenFile` (~463 µs for 200 peers) is a one-time startup cost; irrelevant to steady-state throughput.
+- `PersistPut` (~5.8 ms) is dominated by bbolt's fsync-per-commit guarantee — this is the cost of durability, not code overhead. In-memory operations are unaffected.
+- `OpenFile` (~436 µs for 200 peers) is a one-time startup cost; irrelevant to steady-state throughput.
 - API handlers are fast in absolute terms (about 1-6 µs), with moderate allocation cost.
 - `BenchmarkAllocateOneIPv4NearlyFull` is intentionally a worst-case scenario and expected to be slower.
+- `CreatePeerHandler` allocs grew from the previous snapshot (42 → 54) because audit-log fields (`client_ip`, `request_id`, `allowedIPs`, `expiresAt`) were added with the write-ahead persist work; trivial in absolute cost given that peer creation is orchestrator-driven (low rate, not data-plane).
 - Current performance baseline is strong; the largest optimization headroom is reducing API handler allocations.
 
 ## Benchmark Legend
@@ -84,31 +85,31 @@ Values below use the median of 3 runs for readability.
 
 | Benchmark | ns/op (median) | B/op | allocs/op |
 |---|---:|---:|---:|
-| BenchmarkAllocateOneIPv4 | 169.5 | 288 | 8 |
-| BenchmarkAllocateOneIPv4NearlyFull | 11434 | 4064 | 510 |
-| BenchmarkAllocateOneIPv6 | 336.8 | 360 | 9 |
-| BenchmarkEnsurePeerRotate | 45161 | 1376 | 25 |
-| BenchmarkEnsurePeerNew | 45493 | 1872 | 36 |
-| BenchmarkDeletePeer | 3441 | 704 | 10 |
-| BenchmarkPeerStoreSet | 33.77 | 0 | 0 |
-| BenchmarkPeerStoreGet | 23.04 | 0 | 0 |
-| BenchmarkPeerStoreGetParallel | 160.3 | 0 | 0 |
-| BenchmarkPeerStoreSetParallel | 146.4 | 0 | 0 |
-| BenchmarkPeerStoreListPaginated1000 | 1362 | 6912 | 1 |
-| BenchmarkPeerStoreForEach1000 | 13527 | 0 | 0 |
-| BenchmarkPeerStorePersistPut | 11485125 | 20077 | 55 |
-| BenchmarkPeerStoreOpenFile | 462683 | 284595 | 3860 |
+| BenchmarkAllocateOneIPv4 | 139.9 | 288 | 8 |
+| BenchmarkAllocateOneIPv4NearlyFull | 10752 | 4064 | 510 |
+| BenchmarkAllocateOneIPv6 | 275.9 | 360 | 9 |
+| BenchmarkEnsurePeerRotate | 43971 | 1376 | 25 |
+| BenchmarkEnsurePeerNew | 44614 | 1869 | 36 |
+| BenchmarkDeletePeer | 2550 | 736 | 13 |
+| BenchmarkPeerStoreSet | 34.10 | 0 | 0 |
+| BenchmarkPeerStoreGet | 22.87 | 0 | 0 |
+| BenchmarkPeerStoreGetParallel | 151.0 | 0 | 0 |
+| BenchmarkPeerStoreSetParallel | 145.2 | 0 | 0 |
+| BenchmarkPeerStoreListPaginated1000 | 1334 | 6912 | 1 |
+| BenchmarkPeerStoreForEach1000 | 13353 | 0 | 0 |
+| BenchmarkPeerStorePersistPut | 5815187 | 20011 | 55 |
+| BenchmarkPeerStoreOpenFile | 435520 | 284704 | 3861 |
 
 ## internal/server
 
 | Benchmark | ns/op (median) | B/op | allocs/op |
 |---|---:|---:|---:|
-| BenchmarkListPeersHandler | 5846 | 8445 | 17 |
-| BenchmarkCreatePeerHandler | 4235 | 8346 | 42 |
-| BenchmarkGetPeerHandler | 1000 | 1441 | 11 |
-| BenchmarkListPeersHandlerParallel | 3228 | 8517 | 17 |
-| BenchmarkGetPeerHandlerParallel | 710.4 | 1442 | 11 |
-| BenchmarkAPIKeyMiddleware | 213.5 | 224 | 5 |
+| BenchmarkListPeersHandler | 5420 | 8443 | 17 |
+| BenchmarkCreatePeerHandler | 4634 | 8606 | 54 |
+| BenchmarkGetPeerHandler | 920.0 | 1441 | 11 |
+| BenchmarkListPeersHandlerParallel | 3060 | 8521 | 17 |
+| BenchmarkGetPeerHandlerParallel | 574.6 | 1442 | 11 |
+| BenchmarkAPIKeyMiddleware | 191.5 | 224 | 5 |
 
 ## Notes
 
