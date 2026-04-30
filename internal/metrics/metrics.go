@@ -65,6 +65,17 @@ type Metrics struct {
 	// holds a record that will be restored to the device on next startup.
 	// This is the alert-the-on-call signal.
 	PersistRollbackFailed prometheus.Counter
+
+	// HTTPRequests counts every HTTP request the API handled, labelled by
+	// method, route template (e.g. "/peers/:peerId" — never the raw path,
+	// which would cardinality-bomb on UUIDs), and status_class (2xx..5xx).
+	// Use for error-rate alerts and 401-burst detection (credential probing).
+	HTTPRequests *prometheus.CounterVec
+
+	// HTTPDuration measures end-to-end request latency from middleware entry
+	// to handler completion, labelled by method and route template. Use for
+	// p99 latency dashboards and slow-endpoint detection.
+	HTTPDuration *prometheus.HistogramVec
 }
 
 // New constructs a Metrics bundle and registers it on a fresh registry.
@@ -93,6 +104,18 @@ func New() *Metrics {
 			Name: "wgkeeper_persist_rollback_failed_total",
 			Help: "Persist rollback attempts that themselves failed — bbolt holds a record that will be restored to the device on next startup. Page on this.",
 		}),
+		HTTPRequests: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "wgkeeper_http_requests_total",
+			Help: "Total HTTP requests served, labelled by method, route template, and status class.",
+		}, []string{"method", "path", "status_class"}),
+		HTTPDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name: "wgkeeper_http_request_duration_seconds",
+			Help: "HTTP request latency from middleware entry to handler completion.",
+			// Same buckets as peer-op duration: in-memory <1ms, bbolt fsync,
+			// netlink, degenerate >1s. Letting both share the bucket grid
+			// makes joining histograms in PromQL straightforward.
+			Buckets: []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5},
+		}, []string{"method", "path"}),
 	}
 
 	reg.MustRegister(
@@ -100,6 +123,8 @@ func New() *Metrics {
 		m.OpDuration,
 		m.PersistRollback,
 		m.PersistRollbackFailed,
+		m.HTTPRequests,
+		m.HTTPDuration,
 		// Standard process_* and go_* collectors give memory, GC, FDs.
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		collectors.NewGoCollector(),
