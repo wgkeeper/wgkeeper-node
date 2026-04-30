@@ -339,6 +339,31 @@ Both fields are required when enabled. `token` **must** differ from `auth.api_ke
 
 The `path` label uses the route template (e.g. `/peers/:peerId`), never the raw URL — UUIDs would explode cardinality. Unmatched routes (404s) are bucketed under `path="unmatched"`.
 
+### Per-peer metrics (opt-in)
+
+Enable with `metrics.per_peer: true` to expose:
+
+| Metric | Type | Labels |
+|--------|------|--------|
+| `wgkeeper_peer_rx_bytes_total` | counter | `peer_id`, `allowed_ip` |
+| `wgkeeper_peer_tx_bytes_total` | counter | `peer_id`, `allowed_ip` |
+| `wgkeeper_peer_last_handshake_seconds` | gauge (age) | `peer_id`, `allowed_ip` |
+| `wgkeeper_peers_capped` | gauge | — |
+
+`metrics.per_peer_max` caps cardinality. The collector keeps the **top-N peers by current scrape-window traffic** — quieter peers fall out of metrics but remain visible via `GET /peers/:id`. `wgkeeper_peers_capped` reports how many peers were excluded so the operator never has false confidence in coverage.
+
+**Cardinality scaling:**
+
+| Active peers | Recommended `per_peer_max` | Series count | 30-day storage |
+|--------------|----------------------------|--------------|----------------|
+| < 500 | 500 | ~1 500 | ~30 MB |
+| 500 – 2 000 | 200 | ~600 | ~13 MB |
+| 2 000 – 10 000 | 100 *(default)* | ~300 | ~7 MB |
+| 10 000+ | 50 | ~150 | ~3 MB |
+| 50 000+ | keep `per_peer: false`; drill down via REST `GET /peers/:id` |
+
+For deployments running many wgkeeper nodes with thousands of peers each, consider `vmagent` push-based remote_write to VictoriaMetrics or Prometheus Mimir — both are drop-in compatible with this exporter.
+
 ### ⚠️ Do not publish the metrics port on the host
 
 In Docker, **never** add `9090:9090` to `ports:`. Operational signal (peer counts, version, capacity) on the public internet without mTLS is a recon channel. Keep the endpoint inside the Docker network and let Prometheus scrape via service name.

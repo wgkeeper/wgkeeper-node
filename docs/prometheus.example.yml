@@ -1,13 +1,15 @@
 # Example Prometheus scrape config for wgkeeper-node.
 #
-# Mount this file at /etc/prometheus/prometheus.yml and the bearer token at
-# /etc/prometheus/wgkeeper-token. The token is the value of metrics.token
-# from wgkeeper's config.yaml — generate it with:
-#   openssl rand -hex 32 > wgkeeper-token
+# Two equivalent ways to pass the bearer token:
+#   A) bearer_token_file — token lives in a separate file (default below)
+#   B) authorization.credentials — token inline in this YAML (see bottom)
+#
+# Pick (A) if you want secrets out of config files, (B) if file-permission
+# pitfalls in bind-mounts are causing pain.
 #
 # In a Docker compose where wgkeeper is the service named "wireguard",
-# Prometheus reaches it via DNS — the metrics port is never published on the
-# host. See README → Metrics for the full pattern.
+# Prometheus reaches it via DNS (http://wireguard:9090). The metrics port is
+# never published on the host. See README → Metrics for the full pattern.
 
 global:
   scrape_interval: 30s
@@ -15,9 +17,27 @@ global:
 
 scrape_configs:
   - job_name: wgkeeper
+    # ─── (A) bearer_token_file ───────────────────────────────────────────
+    # Generate with:  openssl rand -hex 32 > wgkeeper-token
+    # Mount as a *file* (not directory) at the path below.
+    #
+    # IMPORTANT: bind-mounted secrets must be readable by the container's
+    # runtime user (Prometheus runs as `nobody`/UID 65534, not root):
+    #   chmod 644 ./wgkeeper-token
+    # `chmod 600 + chown root` in the host won't work — UIDs differ.
+    # Also: the file MUST exist before `docker compose up`, otherwise Docker
+    # creates a directory in its place and Prometheus fails with
+    # "is a directory".
     bearer_token_file: /etc/prometheus/wgkeeper-token
+
+    # ─── (B) inline credentials — uncomment instead of (A) ───────────────
+    # authorization:
+    #   type: Bearer
+    #   credentials: "PASTE_THE_SAME_HEX_AS_metrics.token_HERE"
+
     static_configs:
       - targets: ["wireguard:9090"]
+
     # Uncomment when wgkeeper exposes /metrics over TLS:
     # scheme: https
     # tls_config:

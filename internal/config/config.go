@@ -20,6 +20,17 @@ const (
 	errMsgRequired        = "%s is required"
 	minAPIKeyLength       = 32
 	minMetricsTokenLength = 32
+
+	// defaultMetricsPerPeerMax caps the per-peer metrics series count when
+	// per_peer is enabled but per_peer_max is left unset. Conservative — the
+	// safe upper bound for nodes serving a few thousand peers without putting
+	// pressure on Prometheus retention.
+	defaultMetricsPerPeerMax = 100
+
+	// maxMetricsPerPeerMax is a sanity ceiling: anything larger and the
+	// operator should reconsider topology (federation / VictoriaMetrics push)
+	// rather than crank the cap.
+	maxMetricsPerPeerMax = 100000
 )
 
 type Config struct {
@@ -46,6 +57,18 @@ type Config struct {
 	// distinct secret from APIKey: compromise of the scrape token must not
 	// grant peer-management access. Required when MetricsPort > 0.
 	MetricsToken string
+
+	// MetricsPerPeer toggles the per-peer Prometheus metrics
+	// (wgkeeper_peer_rx_bytes_total / tx / last_handshake_seconds). Off by
+	// default — enabling expands cardinality with peer count.
+	MetricsPerPeer bool
+
+	// MetricsPerPeerMax caps the number of peers exposed in per-peer metrics
+	// to bound cardinality. The collector keeps the top-N peers by current
+	// scrape-window traffic; quieter peers fall out of metrics but remain
+	// visible via the REST API. Defaults to defaultMetricsPerPeerMax when
+	// MetricsPerPeer is true.
+	MetricsPerPeerMax int
 }
 
 type wireguardRouting struct {
@@ -73,8 +96,10 @@ type fileConfig struct {
 		PeerStoreFile string           `yaml:"peer_store_file"`
 	} `yaml:"wireguard"`
 	Metrics struct {
-		Port  int    `yaml:"port"`
-		Token string `yaml:"token"`
+		Port       int    `yaml:"port"`
+		Token      string `yaml:"token"`
+		PerPeer    bool   `yaml:"per_peer"`
+		PerPeerMax int    `yaml:"per_peer_max"`
 	} `yaml:"metrics"`
 }
 
@@ -117,26 +142,28 @@ func loadConfigFile(path string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	metricsPort, metricsToken, err := parseMetrics(fc)
+	metricsPort, metricsToken, perPeer, perPeerMax, err := parseMetrics(fc)
 	if err != nil {
 		return Config{}, err
 	}
 	return Config{
-		Port:          portValue,
-		APIKey:        apiKey,
-		TLSCertFile:   tlsCert,
-		TLSKeyFile:    tlsKey,
-		AllowedNets:   allowedNets,
-		WGInterface:   wgInterface,
-		WGSubnet:      wgSubnet,
-		WGServerIP:    wgServerIP,
-		WGSubnet6:     wgSubnet6,
-		WGServerIP6:   wgServerIP6,
-		WGListenPort:  wgListenPort,
-		WANInterface:  wanInterface,
-		PeerStoreFile: strings.TrimSpace(peerStoreFile),
-		MetricsPort:   metricsPort,
-		MetricsToken:  metricsToken,
+		Port:              portValue,
+		APIKey:            apiKey,
+		TLSCertFile:       tlsCert,
+		TLSKeyFile:        tlsKey,
+		AllowedNets:       allowedNets,
+		WGInterface:       wgInterface,
+		WGSubnet:          wgSubnet,
+		WGServerIP:        wgServerIP,
+		WGSubnet6:         wgSubnet6,
+		WGServerIP6:       wgServerIP6,
+		WGListenPort:      wgListenPort,
+		WANInterface:      wanInterface,
+		PeerStoreFile:     strings.TrimSpace(peerStoreFile),
+		MetricsPort:       metricsPort,
+		MetricsToken:      metricsToken,
+		MetricsPerPeer:    perPeer,
+		MetricsPerPeerMax: perPeerMax,
 	}, nil
 }
 
@@ -144,23 +171,40 @@ func loadConfigFile(path string) (Config, error) {
 // (port == 0). When enabled, the token is mandatory and must meet the same
 // minimum length as auth.api_key — refusing the unauthenticated configuration
 // at startup is the main guarantee of this section.
-func parseMetrics(fc fileConfig) (port int, token string, err error) {
+//
+// Per-peer metrics (per_peer / per_peer_max) are an opt-in cardinality
+// expansion. When per_peer is true and per_peer_max is unset (0), it defaults
+// to defaultMetricsPerPeerMax. Setting per_peer without metrics.port is a
+// no-op (warned indirectly by being unused).
+func parseMetrics(fc fileConfig) (port int, token string, perPeer bool, perPeerMax int, err error) {
 	port = fc.Metrics.Port
 	token = strings.TrimSpace(fc.Metrics.Token)
+	perPeer = fc.Metrics.PerPeer
+	perPeerMax = fc.Metrics.PerPeerMax
 	if port == 0 {
 		// Endpoint disabled. Token is ignored — no need to validate it.
-		return 0, "", nil
+		return 0, "", false, 0, nil
 	}
 	if port < 1 || port > 65535 {
-		return 0, "", fmt.Errorf("metrics.port must be 0 (disabled) or a valid TCP port (1..65535)")
+		return 0, "", false, 0, fmt.Errorf("metrics.port must be 0 (disabled) or a valid TCP port (1..65535)")
 	}
 	if len(token) < minMetricsTokenLength {
-		return 0, "", fmt.Errorf("metrics.token must be at least %d characters when metrics.port is set; do not reuse auth.api_key", minMetricsTokenLength)
+		return 0, "", false, 0, fmt.Errorf("metrics.token must be at least %d characters when metrics.port is set; do not reuse auth.api_key", minMetricsTokenLength)
 	}
 	if token == fc.Auth.APIKey {
-		return 0, "", fmt.Errorf("metrics.token must differ from auth.api_key (use a separate secret for the scrape endpoint)")
+		return 0, "", false, 0, fmt.Errorf("metrics.token must differ from auth.api_key (use a separate secret for the scrape endpoint)")
 	}
-	return port, token, nil
+	if perPeer {
+		if perPeerMax < 0 || perPeerMax > maxMetricsPerPeerMax {
+			return 0, "", false, 0, fmt.Errorf("metrics.per_peer_max must be 0 (default %d) or in [1..%d]", defaultMetricsPerPeerMax, maxMetricsPerPeerMax)
+		}
+		if perPeerMax == 0 {
+			perPeerMax = defaultMetricsPerPeerMax
+		}
+	} else {
+		perPeerMax = 0
+	}
+	return port, token, perPeer, perPeerMax, nil
 }
 
 // MetricsEnabled reports whether the optional Prometheus /metrics endpoint is
