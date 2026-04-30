@@ -288,14 +288,18 @@ Removes the peer from the WireGuard interface and the peer store. Returns `404` 
 
 By default, peer state is in-memory only and is lost on restart. Enable persistence by setting `wireguard.peer_store_file` to a writable path (e.g. `/var/lib/wgkeeper/peers.db`).
 
+**The peer store is the source of truth for managed state.** On startup the node reconciles the WireGuard device against the store in both directions: peers in the store but missing on the device are re-installed, and peers on the device whose public key is not in the store are silently removed. The latter recovers cleanly from a crash mid-write and from any out-of-band `wg set` calls — anything not tracked through the API does not survive a restart.
+
+**Writes are crash-safe.** Peer create, rotate, and delete persist to bbolt *before* the WireGuard device is mutated. If the kernel call fails to persist is rolled back; if the process crashes between persist and device update, startup reconcile installs the new state on the device. Clients that already received their private key in the HTTP response keep working across restarts.
+
 **Lifecycle:**
 
 | Event | Behaviour |
 |-------|-----------|
-| Startup — file missing | Start with an empty store |
+| Startup — file missing | Start with an empty store; remove any peers found on the device |
 | Startup — invalid/corrupted DB data or duplicate `peer_id`/`public_key` | Startup fails with a clear error |
-| Startup — file valid | Restore all peers to the WireGuard device; remove any peers outside the current subnets |
-| Peer created / rotated / deleted | Store is written atomically (temp file + rename) |
+| Startup — file valid | Re-install stored peers on the device; remove peers from the device whose key is not in the store; remove peers outside the current subnets |
+| Peer created / rotated / deleted | Persist runs before the device is mutated; on device-error the persist is rolled back |
 | Host reboot, interface recreated | Load file; re-add all stored peers to the device |
 | Subnet changed in config | On next startup, peers outside the new subnets are removed from the store and device |
 | Peer expires (`expiresAt` reached) | Removed automatically by a background goroutine; no orchestrator action required |
