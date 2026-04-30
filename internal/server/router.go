@@ -28,6 +28,10 @@ func NewRouter(ctx context.Context, apiKey string, allowedNets []*net.IPNet, wgS
 	router.Use(bodyLimitMiddleware(MaxRequestBodySize))
 	router.Use(newRateLimitMiddleware(ctx, allowedNets))
 	router.Use(debugMiddleware(debug))
+	// Metrics middleware records request count + duration. Nil-safe: when
+	// metrics are disabled, GinMiddleware returns a no-op so we register it
+	// unconditionally.
+	router.Use(m.GinMiddleware())
 	router.Use(gin.LoggerWithFormatter(func(param gin.LogFormatterParams) string {
 		if param.Path == "/healthz" || param.Path == "/readyz" {
 			return ""

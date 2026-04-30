@@ -333,7 +333,11 @@ Both fields are required when enabled. `token` **must** differ from `auth.api_ke
 | `wgkeeper_wireguard_rx_bytes_total` | counter | — | total received bytes across all peers |
 | `wgkeeper_wireguard_tx_bytes_total` | counter | — | total transmitted bytes across all peers |
 | `wgkeeper_wireguard_stale_peers` | gauge | — | peers with no handshake in last 5 min (degradation signal) |
+| `wgkeeper_http_requests_total` | counter | `method`, `path`, `status_class` | API throughput, error rate, 401-burst detection |
+| `wgkeeper_http_request_duration_seconds` | histogram | `method`, `path` | per-endpoint p99 latency |
 | `process_*`, `go_*` | — | — | standard process and Go runtime |
+
+The `path` label uses the route template (e.g. `/peers/:peerId`), never the raw URL — UUIDs would explode cardinality. Unmatched routes (404s) are bucketed under `path="unmatched"`.
 
 ### ⚠️ Do not publish the metrics port on the host
 
