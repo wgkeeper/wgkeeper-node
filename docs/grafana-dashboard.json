@@ -11,37 +11,81 @@
   ],
   "__elements": {},
   "__requires": [
-    { "type": "grafana", "id": "grafana", "name": "Grafana", "version": "11.0.0" },
-    { "type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0" },
-    { "type": "panel", "id": "stat", "name": "Stat", "version": "" },
-    { "type": "panel", "id": "gauge", "name": "Gauge", "version": "" },
-    { "type": "panel", "id": "timeseries", "name": "Time series", "version": "" },
-    { "type": "panel", "id": "row", "name": "Row", "version": "" }
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "11.0.0"
+    },
+    {
+      "type": "datasource",
+      "id": "prometheus",
+      "name": "Prometheus",
+      "version": "1.0.0"
+    },
+    {
+      "type": "panel",
+      "id": "stat",
+      "name": "Stat",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "gauge",
+      "name": "Gauge",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "timeseries",
+      "name": "Time series",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "row",
+      "name": "Row",
+      "version": ""
+    }
   ],
   "title": "WGKeeper Node",
   "uid": "wgkeeper-overview",
-  "tags": ["wireguard", "wgkeeper", "vpn"],
+  "tags": [
+    "wireguard",
+    "wgkeeper",
+    "vpn"
+  ],
   "timezone": "browser",
   "schemaVersion": 39,
   "version": 1,
   "refresh": "30s",
-  "time": { "from": "now-6h", "to": "now" },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
   "templating": {
     "list": [
       {
         "name": "instance",
         "type": "query",
-        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-        "query": "label_values(wgkeeper_peers, instance)",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "query": "label_values(up{job=\"wgkeeper\"}, instance)",
         "refresh": 2,
         "includeAll": false,
         "multi": false,
-        "label": "Instance"
+        "label": "Instance",
+        "description": "Sources from `up` so a DOWN node is still selectable \u2014 otherwise the dropdown would be empty and the operator would not see the outage."
       },
       {
         "name": "peer_id",
         "type": "query",
-        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
         "query": "label_values(wgkeeper_peer_rx_bytes_total{instance=\"$instance\"}, peer_id)",
         "refresh": 2,
         "includeAll": false,
@@ -55,7 +99,10 @@
     "list": [
       {
         "name": "Process restarts",
-        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
         "enable": true,
         "iconColor": "orange",
         "expr": "changes(process_start_time_seconds{instance=\"$instance\"}[1m]) > 0",
@@ -65,145 +112,672 @@
     ]
   },
   "panels": [
-    { "id": 100, "type": "row", "title": "Overview", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }, "panels": [] },
-
+    {
+      "id": 90,
+      "type": "row",
+      "title": "Status",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "id": 80,
+      "type": "stat",
+      "title": "Node status",
+      "description": "Prometheus's `up` metric for the wgkeeper scrape target. UP = the last scrape succeeded; DOWN = the node is unreachable, the metrics endpoint is not listening, or auth is failing. This is the single 'is the node alive?' signal \u2014 every other panel showing 'No data' while this is DOWN is expected.",
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 0,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "up{job=\"wgkeeper\",instance=\"$instance\"}",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DOWN",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "UP",
+                  "color": "green"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "noValue": "DOWN"
+        }
+      },
+      "options": {
+        "graphMode": "none",
+        "colorMode": "background",
+        "textMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
+    },
+    {
+      "id": 81,
+      "type": "stat",
+      "title": "Time since last successful scrape",
+      "description": "How long ago Prometheus last successfully scraped this node. Steady-state should be roughly the scrape_interval. Climbing \u2192 node is failing / slow.",
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 8,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "time() - timestamp(up{job=\"wgkeeper\",instance=\"$instance\"} == bool 1)",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 60
+              },
+              {
+                "color": "red",
+                "value": 300
+              }
+            ]
+          },
+          "noValue": "no successful scrape"
+        }
+      },
+      "options": {
+        "graphMode": "none",
+        "colorMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
+    },
+    {
+      "id": 82,
+      "type": "stat",
+      "title": "Uptime",
+      "description": "Time since process start. A drop = restart (orange annotation marks the event on every graph). Yellow under 5 minutes \u2014 fresh restart.",
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 1
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "time() - process_start_time_seconds{instance=\"$instance\"}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "dtdurations",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "yellow",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 300
+              }
+            ]
+          },
+          "noValue": "\u2014"
+        }
+      },
+      "options": {
+        "graphMode": "none",
+        "colorMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
+    },
+    {
+      "id": 100,
+      "type": "row",
+      "title": "Overview",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 5
+      },
+      "panels": []
+    },
     {
       "id": 1,
       "type": "stat",
       "title": "Active peers",
-      "description": "Peers with a WireGuard handshake in the last 2 minutes — i.e. currently passing traffic.",
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Peers with a WireGuard handshake in the last 2 minutes \u2014 i.e. currently passing traffic.",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "wgkeeper_peers{state=\"active\",instance=\"$instance\"}", "refId": "A", "legendFormat": "active" }
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "wgkeeper_peers{state=\"active\",instance=\"$instance\"}",
+          "refId": "A",
+          "legendFormat": "active"
+        }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "color": { "mode": "thresholds" },
-          "thresholds": { "mode": "absolute", "steps": [
-            { "color": "yellow", "value": null },
-            { "color": "green", "value": 1 }
-          ]}
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "yellow",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
         }
       },
-      "options": { "graphMode": "area", "colorMode": "value", "textMode": "auto", "reduceOptions": { "calcs": ["lastNotNull"] } }
+      "options": {
+        "graphMode": "area",
+        "colorMode": "value",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
     },
     {
       "id": 2,
       "type": "stat",
       "title": "Issued peers",
       "description": "Total peers in the persistent store (peer_store_file). Includes peers that may not be currently active.",
-      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "wgkeeper_peers{state=\"issued\",instance=\"$instance\"}", "refId": "A" }
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "wgkeeper_peers{state=\"issued\",instance=\"$instance\"}",
+          "refId": "A"
+        }
       ],
-      "fieldConfig": { "defaults": { "unit": "short", "color": { "mode": "fixed", "fixedColor": "blue" } } },
-      "options": { "graphMode": "area", "colorMode": "value", "reduceOptions": { "calcs": ["lastNotNull"] } }
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          }
+        }
+      },
+      "options": {
+        "graphMode": "area",
+        "colorMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
     },
     {
       "id": 3,
       "type": "gauge",
       "title": "Subnet utilization",
-      "description": "issued / possible. Yellow at 70%, red at 90% — at 100% no new peers can be created (HTTP 409 no_available_ip).",
-      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "issued / possible. Yellow at 70%, red at 90% \u2014 at 100% no new peers can be created (HTTP 409 no_available_ip).",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sum(wgkeeper_peers{state=\"issued\",instance=\"$instance\"}) / sum(wgkeeper_peers{state=\"possible\",instance=\"$instance\"})", "refId": "A" }
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(wgkeeper_peers{state=\"issued\",instance=\"$instance\"}) / sum(wgkeeper_peers{state=\"possible\",instance=\"$instance\"})",
+          "refId": "A"
+        }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "percentunit",
-          "min": 0, "max": 1,
-          "thresholds": { "mode": "absolute", "steps": [
-            { "color": "green", "value": null },
-            { "color": "yellow", "value": 0.7 },
-            { "color": "red", "value": 0.9 }
-          ]}
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.7
+              },
+              {
+                "color": "red",
+                "value": 0.9
+              }
+            ]
+          }
         }
       },
-      "options": { "showThresholdLabels": false, "showThresholdMarkers": true }
+      "options": {
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      }
     },
     {
       "id": 4,
       "type": "stat",
       "title": "Stale peers",
       "description": "Peers with no WireGuard handshake in the last 5 minutes (or never). >0 means clients can't reach the node, are offline, or have stale configs.",
-      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "wgkeeper_wireguard_stale_peers{instance=\"$instance\"}", "refId": "A" }
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "wgkeeper_wireguard_stale_peers{instance=\"$instance\"}",
+          "refId": "A"
+        }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "thresholds": { "mode": "absolute", "steps": [
-            { "color": "green", "value": null },
-            { "color": "yellow", "value": 1 },
-            { "color": "red", "value": 5 }
-          ]}
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          }
         }
       },
-      "options": { "graphMode": "area", "colorMode": "value", "reduceOptions": { "calcs": ["lastNotNull"] } }
+      "options": {
+        "graphMode": "area",
+        "colorMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
     },
-
-    { "id": 110, "type": "row", "title": "VPN plane", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 }, "panels": [] },
-
+    {
+      "id": 110,
+      "type": "row",
+      "title": "VPN plane",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 10
+      },
+      "panels": []
+    },
     {
       "id": 10,
       "type": "timeseries",
       "title": "VPN throughput (rx / tx)",
       "description": "Aggregate WireGuard kernel traffic counters across all peers, expressed as bits per second. Source of truth for 'is the VPN actually moving data'.",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 6 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 11
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "rate(wgkeeper_wireguard_rx_bytes_total{instance=\"$instance\"}[$__rate_interval]) * 8", "legendFormat": "rx", "refId": "A" },
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "rate(wgkeeper_wireguard_tx_bytes_total{instance=\"$instance\"}[$__rate_interval]) * 8", "legendFormat": "tx", "refId": "B" }
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "rate(wgkeeper_wireguard_rx_bytes_total{instance=\"$instance\"}[$__rate_interval]) * 8",
+          "legendFormat": "rx",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "rate(wgkeeper_wireguard_tx_bytes_total{instance=\"$instance\"}[$__rate_interval]) * 8",
+          "legendFormat": "tx",
+          "refId": "B"
+        }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "bps", "min": 0,
-          "custom": { "fillOpacity": 10, "lineWidth": 2, "showPoints": "never", "drawStyle": "line", "spanNulls": false }
+          "unit": "bps",
+          "min": 0,
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "drawStyle": "line",
+            "spanNulls": false
+          }
         },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "rx" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "blue" } }] },
-          { "matcher": { "id": "byName", "options": "tx" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] }
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "rx"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "tx"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          }
         ]
       },
       "options": {
-        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["min", "max", "lastNotNull"] },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "min",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       }
     },
-
-    { "id": 120, "type": "row", "title": "Orchestrator API", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 }, "panels": [] },
-
+    {
+      "id": 120,
+      "type": "row",
+      "title": "Orchestrator API",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 19
+      },
+      "panels": []
+    },
     {
       "id": 20,
       "type": "timeseries",
       "title": "API request rate by status",
-      "description": "Stacked. 4xx burst → credential probing or orchestrator misconfig. 5xx burst → backend trouble (kernel, bbolt).",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Stacked. 4xx burst \u2192 credential probing or orchestrator misconfig. 5xx burst \u2192 backend trouble (kernel, bbolt).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 20
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sum by (status_class) (rate(wgkeeper_http_requests_total{instance=\"$instance\"}[$__rate_interval]))", "legendFormat": "{{status_class}}", "refId": "A" }
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (status_class) (rate(wgkeeper_http_requests_total{instance=\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{status_class}}",
+          "refId": "A"
+        }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "reqps", "min": 0,
-          "custom": { "fillOpacity": 30, "lineWidth": 1, "stacking": { "mode": "normal" }, "showPoints": "never" }
+          "unit": "reqps",
+          "min": 0,
+          "custom": {
+            "fillOpacity": 30,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal"
+            },
+            "showPoints": "never"
+          }
         },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "5xx" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }] },
-          { "matcher": { "id": "byName", "options": "4xx" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }] },
-          { "matcher": { "id": "byName", "options": "3xx" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "yellow" } }] },
-          { "matcher": { "id": "byName", "options": "2xx" }, "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }] }
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "5xx"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "4xx"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "3xx"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "yellow"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "2xx"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          }
         ]
       },
       "options": {
-        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["min", "max", "lastNotNull"] },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "min",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       }
     },
     {
@@ -211,126 +785,368 @@
       "type": "timeseries",
       "title": "HTTP p99 latency by route",
       "description": "End-to-end request latency at the gin middleware. Path is the route template (/peers/:peerId, never raw URLs).",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 20
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "histogram_quantile(0.99, sum by (le, path) (rate(wgkeeper_http_request_duration_seconds_bucket{instance=\"$instance\"}[$__rate_interval])))", "legendFormat": "{{path}}", "refId": "A" }
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le, path) (rate(wgkeeper_http_request_duration_seconds_bucket{instance=\"$instance\"}[$__rate_interval])))",
+          "legendFormat": "{{path}}",
+          "refId": "A"
+        }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "s", "min": 0, "custom": { "fillOpacity": 0, "lineWidth": 2, "showPoints": "never" } }
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "fillOpacity": 0,
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
+        }
       },
       "options": {
-        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["max", "lastNotNull"] },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       }
     },
-
-    { "id": 130, "type": "row", "title": "Peer operations", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 }, "panels": [] },
-
+    {
+      "id": 130,
+      "type": "row",
+      "title": "Peer operations",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 28
+      },
+      "panels": []
+    },
     {
       "id": 30,
       "type": "timeseries",
       "title": "Peer ops by type",
-      "description": "Stacked rate of create / rotate / delete / expire ops. Shows orchestrator churn — if rotate goes flat-zero, the orchestrator may be stuck.",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Stacked rate of create / rotate / delete / expire ops. Shows orchestrator churn \u2014 if rotate goes flat-zero, the orchestrator may be stuck.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 29
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sum by (op) (rate(wgkeeper_peer_operations_total{instance=\"$instance\"}[$__rate_interval]))", "legendFormat": "{{op}}", "refId": "A" }
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (op) (rate(wgkeeper_peer_operations_total{instance=\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{op}}",
+          "refId": "A"
+        }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "ops", "min": 0,
-          "custom": { "fillOpacity": 30, "lineWidth": 1, "stacking": { "mode": "normal" }, "showPoints": "never" }
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "fillOpacity": 30,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal"
+            },
+            "showPoints": "never"
+          }
         }
       },
       "options": {
-        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["min", "max", "lastNotNull"] },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "min",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       }
     },
     {
       "id": 31,
       "type": "timeseries",
       "title": "Peer-op latency p50 / p95 / p99",
-      "description": "End-to-end EnsurePeer / DeletePeer time per op. Includes bbolt fsync and kernel netlink call. p99 spikes → kernel module under pressure or disk slow.",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "End-to-end EnsurePeer / DeletePeer time per op. Includes bbolt fsync and kernel netlink call. p99 spikes \u2192 kernel module under pressure or disk slow.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 29
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "histogram_quantile(0.50, sum by (le, op) (rate(wgkeeper_peer_operation_duration_seconds_bucket{instance=\"$instance\"}[$__rate_interval])))", "legendFormat": "p50 {{op}}", "refId": "A" },
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "histogram_quantile(0.95, sum by (le, op) (rate(wgkeeper_peer_operation_duration_seconds_bucket{instance=\"$instance\"}[$__rate_interval])))", "legendFormat": "p95 {{op}}", "refId": "B" },
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "histogram_quantile(0.99, sum by (le, op) (rate(wgkeeper_peer_operation_duration_seconds_bucket{instance=\"$instance\"}[$__rate_interval])))", "legendFormat": "p99 {{op}}", "refId": "C" }
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "histogram_quantile(0.50, sum by (le, op) (rate(wgkeeper_peer_operation_duration_seconds_bucket{instance=\"$instance\"}[$__rate_interval])))",
+          "legendFormat": "p50 {{op}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, op) (rate(wgkeeper_peer_operation_duration_seconds_bucket{instance=\"$instance\"}[$__rate_interval])))",
+          "legendFormat": "p95 {{op}}",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le, op) (rate(wgkeeper_peer_operation_duration_seconds_bucket{instance=\"$instance\"}[$__rate_interval])))",
+          "legendFormat": "p99 {{op}}",
+          "refId": "C"
+        }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "s", "min": 0, "custom": { "fillOpacity": 0, "lineWidth": 2, "showPoints": "never" } }
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "fillOpacity": 0,
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
+        }
       },
       "options": {
-        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["max", "lastNotNull"] },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       }
     },
-
-    { "id": 140, "type": "row", "title": "Errors", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 32 }, "panels": [] },
-
+    {
+      "id": 140,
+      "type": "row",
+      "title": "Errors",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 37
+      },
+      "panels": []
+    },
     {
       "id": 40,
       "type": "timeseries",
       "title": "Peer-op error rate",
       "description": "Errors / total peer operations. Yellow > 5%, red > 20%. Sustained > 0 means peer creation is failing somewhere.",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 33 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 38
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sum(rate(wgkeeper_peer_operations_total{result!=\"success\",instance=\"$instance\"}[$__rate_interval])) / clamp_min(sum(rate(wgkeeper_peer_operations_total{instance=\"$instance\"}[$__rate_interval])), 1e-9)", "legendFormat": "error rate", "refId": "A" }
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(rate(wgkeeper_peer_operations_total{result!=\"success\",instance=\"$instance\"}[$__rate_interval])) / clamp_min(sum(rate(wgkeeper_peer_operations_total{instance=\"$instance\"}[$__rate_interval])), 1e-9)",
+          "legendFormat": "error rate",
+          "refId": "A"
+        }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "percentunit", "min": 0, "max": 1,
-          "custom": { "fillOpacity": 20, "lineWidth": 2, "showPoints": "never", "thresholdsStyle": { "mode": "line+area" } },
-          "thresholds": { "mode": "absolute", "steps": [
-            { "color": "green", "value": null },
-            { "color": "yellow", "value": 0.05 },
-            { "color": "red", "value": 0.2 }
-          ]}
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": {
+            "fillOpacity": 20,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "thresholdsStyle": {
+              "mode": "line+area"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.05
+              },
+              {
+                "color": "red",
+                "value": 0.2
+              }
+            ]
+          }
         }
       },
       "options": {
-        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["max", "lastNotNull"] },
-        "tooltip": { "mode": "single", "sort": "none" }
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
       }
     },
     {
       "id": 41,
       "type": "timeseries",
       "title": "Errors by reason",
-      "description": "Breakdown of failure causes — guides triage. error_no_ip → subnet full. error_persist → bbolt I/O. error_device → kernel WG. error_unsupported_family → orchestrator misconfig.",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 33 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Breakdown of failure causes \u2014 guides triage. error_no_ip \u2192 subnet full. error_persist \u2192 bbolt I/O. error_device \u2192 kernel WG. error_unsupported_family \u2192 orchestrator misconfig.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 38
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "sum by (result) (rate(wgkeeper_peer_operations_total{result!=\"success\",instance=\"$instance\"}[$__rate_interval]))", "legendFormat": "{{result}}", "refId": "A" }
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum by (result) (rate(wgkeeper_peer_operations_total{result!=\"success\",instance=\"$instance\"}[$__rate_interval]))",
+          "legendFormat": "{{result}}",
+          "refId": "A"
+        }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "ops", "min": 0,
-          "custom": { "fillOpacity": 30, "lineWidth": 1, "stacking": { "mode": "normal" }, "showPoints": "never" }
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "fillOpacity": 30,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal"
+            },
+            "showPoints": "never"
+          }
         }
       },
       "options": {
-        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["min", "max", "lastNotNull"] },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "min",
+            "max",
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       }
     },
-
-    { "id": 145, "type": "row", "title": "Per-peer (only when metrics.per_peer enabled)", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 41 }, "panels": [] },
-
+    {
+      "id": 145,
+      "type": "row",
+      "title": "Per-peer (only when metrics.per_peer enabled)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 46
+      },
+      "panels": []
+    },
     {
       "id": 70,
       "type": "table",
       "title": "Top peers by rate",
       "description": "Top-N peers ranked by current scrape-window traffic (rx + tx). Empty when metrics.per_peer is off.",
-      "gridPos": { "h": 10, "w": 16, "x": 0, "y": 42 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "h": 10,
+        "w": 16,
+        "x": 0,
+        "y": 47
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
           "expr": "topk(20, rate(wgkeeper_peer_rx_bytes_total{instance=\"$instance\"}[$__rate_interval]) * 8)",
           "legendFormat": "{{peer_id}}",
           "refId": "rx",
@@ -338,7 +1154,10 @@
           "instant": true
         },
         {
-          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
           "expr": "topk(20, rate(wgkeeper_peer_tx_bytes_total{instance=\"$instance\"}[$__rate_interval]) * 8)",
           "legendFormat": "{{peer_id}}",
           "refId": "tx",
@@ -346,7 +1165,10 @@
           "instant": true
         },
         {
-          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
           "expr": "wgkeeper_peer_last_handshake_seconds{instance=\"$instance\"}",
           "legendFormat": "{{peer_id}}",
           "refId": "hs",
@@ -355,11 +1177,19 @@
         }
       ],
       "transformations": [
-        { "id": "merge", "options": {} },
+        {
+          "id": "merge",
+          "options": {}
+        },
         {
           "id": "organize",
           "options": {
-            "excludeByName": { "Time": true, "job": true, "__name__": true, "instance": true },
+            "excludeByName": {
+              "Time": true,
+              "job": true,
+              "__name__": true,
+              "instance": true
+            },
             "renameByName": {
               "peer_id": "Peer ID",
               "allowed_ip": "IP",
@@ -371,160 +1201,433 @@
         }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "short" },
+        "defaults": {
+          "unit": "short"
+        },
         "overrides": [
-          { "matcher": { "id": "byName", "options": "RX bps" }, "properties": [{ "id": "unit", "value": "bps" }] },
-          { "matcher": { "id": "byName", "options": "TX bps" }, "properties": [{ "id": "unit", "value": "bps" }] },
-          { "matcher": { "id": "byName", "options": "HS age (s)" }, "properties": [{ "id": "unit", "value": "s" }] }
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "RX bps"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bps"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "TX bps"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bps"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "HS age (s)"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              }
+            ]
+          }
         ]
       },
-      "options": { "showHeader": true, "footer": { "show": false } }
+      "options": {
+        "showHeader": true,
+        "footer": {
+          "show": false
+        }
+      }
     },
     {
       "id": 71,
       "type": "stat",
       "title": "Peers capped",
-      "description": "Number of peers excluded from per-peer metrics by the per_peer_max cap. Non-zero means the cap is binding — operator may need to raise it or accept that quiet peers are invisible to per-peer metrics.",
-      "gridPos": { "h": 5, "w": 8, "x": 16, "y": 42 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Number of peers excluded from per-peer metrics by the per_peer_max cap. Non-zero means the cap is binding \u2014 operator may need to raise it or accept that quiet peers are invisible to per-peer metrics.",
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 47
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "wgkeeper_peers_capped{instance=\"$instance\"}", "refId": "A" }
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "wgkeeper_peers_capped{instance=\"$instance\"}",
+          "refId": "A"
+        }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "thresholds": { "mode": "absolute", "steps": [
-            { "color": "green", "value": null },
-            { "color": "yellow", "value": 1 }
-          ]}
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              }
+            ]
+          }
         }
       },
-      "options": { "graphMode": "area", "colorMode": "value", "reduceOptions": { "calcs": ["lastNotNull"] } }
+      "options": {
+        "graphMode": "area",
+        "colorMode": "value",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
     },
     {
       "id": 72,
       "type": "timeseries",
       "title": "Drill-down: $peer_id traffic",
       "description": "Per-peer rx/tx for the peer chosen in the variable dropdown. Useful for reading individual client patterns.",
-      "gridPos": { "h": 5, "w": 8, "x": 16, "y": 47 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 52
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "rate(wgkeeper_peer_rx_bytes_total{instance=\"$instance\",peer_id=\"$peer_id\"}[$__rate_interval]) * 8", "legendFormat": "rx", "refId": "A" },
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "rate(wgkeeper_peer_tx_bytes_total{instance=\"$instance\",peer_id=\"$peer_id\"}[$__rate_interval]) * 8", "legendFormat": "tx", "refId": "B" }
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "rate(wgkeeper_peer_rx_bytes_total{instance=\"$instance\",peer_id=\"$peer_id\"}[$__rate_interval]) * 8",
+          "legendFormat": "rx",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "rate(wgkeeper_peer_tx_bytes_total{instance=\"$instance\",peer_id=\"$peer_id\"}[$__rate_interval]) * 8",
+          "legendFormat": "tx",
+          "refId": "B"
+        }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "bps", "min": 0, "custom": { "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" } }
+        "defaults": {
+          "unit": "bps",
+          "min": 0,
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "showPoints": "never"
+          }
+        }
       },
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi", "sort": "desc" } }
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
     },
-
-    { "id": 150, "type": "row", "title": "Crash safety (write-ahead persist)", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 52 }, "panels": [] },
-
+    {
+      "id": 150,
+      "type": "row",
+      "title": "Crash safety (write-ahead persist)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 57
+      },
+      "panels": []
+    },
     {
       "id": 50,
       "type": "stat",
       "title": "Persist rollback FAILED",
-      "description": "PAGE THE ON-CALL if non-zero. bbolt holds a record that device-write rolled back from — orphan that startup reconcile will install on restart.",
-      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 53 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "PAGE THE ON-CALL if non-zero. bbolt holds a record that device-write rolled back from \u2014 orphan that startup reconcile will install on restart.",
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 0,
+        "y": 58
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "wgkeeper_persist_rollback_failed_total{instance=\"$instance\"}", "refId": "A" }
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "wgkeeper_persist_rollback_failed_total{instance=\"$instance\"}",
+          "refId": "A"
+        }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "thresholds": { "mode": "absolute", "steps": [
-            { "color": "green", "value": null },
-            { "color": "red", "value": 1 }
-          ]}
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
         }
       },
-      "options": { "graphMode": "area", "colorMode": "background", "textMode": "value_and_name", "reduceOptions": { "calcs": ["lastNotNull"] } }
+      "options": {
+        "graphMode": "area",
+        "colorMode": "background",
+        "textMode": "value_and_name",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        }
+      }
     },
     {
       "id": 51,
       "type": "timeseries",
       "title": "Persist rollback events by op",
-      "description": "Triggered when configureDevice fails after write-ahead persist. Non-zero rate indicates kernel/WG instability — investigate dmesg.",
-      "gridPos": { "h": 4, "w": 16, "x": 8, "y": 53 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Triggered when configureDevice fails after write-ahead persist. Non-zero rate indicates kernel/WG instability \u2014 investigate dmesg.",
+      "gridPos": {
+        "h": 4,
+        "w": 16,
+        "x": 8,
+        "y": 58
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "increase(wgkeeper_persist_rollback_total{instance=\"$instance\"}[$__rate_interval])", "legendFormat": "{{op}}", "refId": "A" }
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "increase(wgkeeper_persist_rollback_total{instance=\"$instance\"}[$__rate_interval])",
+          "legendFormat": "{{op}}",
+          "refId": "A"
+        }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short", "min": 0,
-          "custom": { "fillOpacity": 50, "lineWidth": 1, "drawStyle": "bars", "showPoints": "never" }
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "fillOpacity": 50,
+            "lineWidth": 1,
+            "drawStyle": "bars",
+            "showPoints": "never"
+          }
         }
       },
       "options": {
-        "legend": { "displayMode": "list", "placement": "bottom" },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       }
     },
-
-    { "id": 160, "type": "row", "title": "Runtime", "collapsed": false, "gridPos": { "h": 1, "w": 24, "x": 0, "y": 57 }, "panels": [] },
-
+    {
+      "id": 160,
+      "type": "row",
+      "title": "Runtime",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 62
+      },
+      "panels": []
+    },
     {
       "id": 60,
       "type": "timeseries",
       "title": "Memory (RSS)",
       "description": "Resident set size. Should be roughly proportional to peer count. A sustained climb without peer growth = leak.",
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 58 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 0,
+        "y": 63
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "process_resident_memory_bytes{instance=\"$instance\"}", "legendFormat": "RSS", "refId": "A" }
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "process_resident_memory_bytes{instance=\"$instance\"}",
+          "legendFormat": "RSS",
+          "refId": "A"
+        }
       ],
-      "fieldConfig": { "defaults": { "unit": "bytes", "min": 0, "custom": { "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" } } },
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } }
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never"
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
     },
     {
       "id": 61,
       "type": "timeseries",
       "title": "Goroutines",
       "description": "Number of active goroutines. Steady-state should be small (~20). A monotonic climb = goroutine leak.",
-      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 58 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 8,
+        "y": 63
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "go_goroutines{instance=\"$instance\"}", "refId": "A" }
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "go_goroutines{instance=\"$instance\"}",
+          "refId": "A"
+        }
       ],
-      "fieldConfig": { "defaults": { "unit": "short", "min": 0, "custom": { "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" } } },
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } }
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never"
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
     },
     {
       "id": 62,
       "type": "timeseries",
       "title": "Open file descriptors",
-      "description": "Open FDs. Should be flat — sockets to wgctrl, bbolt file, two listeners. A climb = leak in HTTP / netlink handling.",
-      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 58 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "description": "Open FDs. Should be flat \u2014 sockets to wgctrl, bbolt file, two listeners. A climb = leak in HTTP / netlink handling.",
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 63
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "process_open_fds{instance=\"$instance\"}", "legendFormat": "fds", "refId": "A" }
-      ],
-      "fieldConfig": { "defaults": { "unit": "short", "min": 0, "custom": { "fillOpacity": 10, "lineWidth": 1, "showPoints": "never" } } },
-      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } }
-    },
-    {
-      "id": 63,
-      "type": "stat",
-      "title": "Uptime",
-      "description": "Time since process start. A drop here = the node restarted (orange annotation marks the event).",
-      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 58 },
-      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" }, "expr": "time() - process_start_time_seconds{instance=\"$instance\"}", "refId": "A" }
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "process_open_fds{instance=\"$instance\"}",
+          "legendFormat": "fds",
+          "refId": "A"
+        }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "dtdurations",
-          "color": { "mode": "thresholds" },
-          "thresholds": { "mode": "absolute", "steps": [
-            { "color": "yellow", "value": null },
-            { "color": "green", "value": 300 }
-          ]}
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "fillOpacity": 10,
+            "lineWidth": 1,
+            "showPoints": "never"
+          }
         }
       },
-      "options": { "graphMode": "none", "colorMode": "value", "reduceOptions": { "calcs": ["lastNotNull"] } }
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      }
     }
   ]
 }
