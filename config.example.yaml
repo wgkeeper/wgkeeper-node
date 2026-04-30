@@ -23,3 +23,15 @@ wireguard:
   # peer_store_file: "/var/lib/wgkeeper/peers.db"
   routing:
     wan_interface: "eth0"
+# Optional: Prometheus /metrics endpoint. Off by default.
+#
+# IMPORTANT: in Docker do NOT publish this port on the host. Keep the
+# endpoint inside the Docker network and let Prometheus scrape via the
+# service name (e.g. http://wireguard:9090/metrics).
+#
+# The token MUST be different from auth.api_key (a separate secret for the
+# scrape plane). Generate one with: openssl rand -hex 32
+#
+# metrics:
+#   port: 9090
+#   token: "REPLACE_WITH_32+_RANDOM_CHARS"

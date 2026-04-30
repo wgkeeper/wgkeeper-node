@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/wgkeeper/wgkeeper-node/internal/config"
+	"github.com/wgkeeper/wgkeeper-node/internal/metrics"
 	"github.com/wgkeeper/wgkeeper-node/internal/server"
 	"github.com/wgkeeper/wgkeeper-node/internal/version"
 	"github.com/wgkeeper/wgkeeper-node/internal/wireguard"
@@ -79,7 +80,27 @@ func main() {
 	slog.Info("starting", "service", version.Name, "version", version.Version)
 	slog.Info("listening", "addr", addr, "protocol", protocol)
 	slog.Info("wireguard ready", "iface", cfg.WGInterface, "listen", cfg.WGListenPort, "subnets", formatSubnetsLog(cfg))
-	httpServer := newHTTPServer(appCtx, cfg, addr, wgService, debug)
+
+	var metricsBundle *metrics.Metrics
+	metricsDone := make(chan struct{})
+	if cfg.MetricsEnabled() {
+		metricsBundle = metrics.New()
+		wgService.SetRollbackObserver(metricsBundle)
+		metricsBundle.BindPeersProvider(peerSnapshotAdapter{svc: wgService})
+		metricsBundle.BindWireGuardProvider(wgSnapshotAdapter{svc: wgService})
+		metricsSrv := metrics.NewServer(cfg.MetricsAddr(), cfg.MetricsToken, metricsBundle)
+		slog.Info("metrics enabled", "addr", cfg.MetricsAddr())
+		go func() {
+			defer close(metricsDone)
+			if err := metrics.Run(appCtx, metricsSrv); err != nil {
+				slog.Error("metrics server error", "error", err)
+			}
+		}()
+	} else {
+		close(metricsDone)
+	}
+
+	httpServer := newHTTPServer(appCtx, cfg, addr, wgService, metricsBundle, debug)
 
 	serverErr := make(chan error, 1)
 	go func() {
@@ -110,6 +131,46 @@ func main() {
 	if err := httpServer.Shutdown(ctx); err != nil {
 		slog.Error("shutdown error", "error", err)
 	}
+	// Wait for the metrics listener (if enabled) to finish too. metrics.Run
+	// reacts to appCancel and shuts down its own server with a 5s budget.
+	<-metricsDone
+}
+
+// peerSnapshotAdapter bridges WireGuardService.Stats() to metrics.PeersProvider
+// so the wireguard package does not depend on the metrics package.
+type peerSnapshotAdapter struct {
+	svc *wireguard.WireGuardService
+}
+
+func (a peerSnapshotAdapter) PeersSnapshot() (metrics.PeersSnapshot, error) {
+	s, err := a.svc.Stats()
+	if err != nil {
+		return metrics.PeersSnapshot{}, err
+	}
+	return metrics.PeersSnapshot{
+		Possible: s.Peers.Possible,
+		Issued:   s.Peers.Issued,
+		Active:   s.Peers.Active,
+	}, nil
+}
+
+// wgSnapshotAdapter bridges WireGuardService.WireGuardSnapshot() to
+// metrics.WireGuardProvider. Symmetric with peerSnapshotAdapter — both keep
+// the wireguard package free of any prometheus dependency.
+type wgSnapshotAdapter struct {
+	svc *wireguard.WireGuardService
+}
+
+func (a wgSnapshotAdapter) WireGuardSnapshot() (metrics.WireGuardSnapshot, error) {
+	s, err := a.svc.WireGuardSnapshot()
+	if err != nil {
+		return metrics.WireGuardSnapshot{}, err
+	}
+	return metrics.WireGuardSnapshot{
+		ReceiveBytesTotal:  s.ReceiveBytesTotal,
+		TransmitBytesTotal: s.TransmitBytesTotal,
+		StalePeers:         s.StalePeers,
+	}, nil
 }
 
 func setupGinMode(debug bool) {
@@ -142,10 +203,10 @@ func isFatalServerError(err error) bool {
 	return err != nil && !errors.Is(err, http.ErrServerClosed)
 }
 
-func newHTTPServer(ctx context.Context, cfg config.Config, addr string, wgService *wireguard.WireGuardService, debug bool) *http.Server {
+func newHTTPServer(ctx context.Context, cfg config.Config, addr string, wgService *wireguard.WireGuardService, m *metrics.Metrics, debug bool) *http.Server {
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           server.NewRouter(ctx, cfg.APIKey, cfg.AllowedNets, wgService, debug),
+		Handler:           server.NewRouter(ctx, cfg.APIKey, cfg.AllowedNets, wgService, m, debug),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,

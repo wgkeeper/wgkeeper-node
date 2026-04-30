@@ -6,8 +6,10 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/wgkeeper/wgkeeper-node/internal/metrics"
 	"github.com/wgkeeper/wgkeeper-node/internal/wireguard"
 
 	"github.com/gin-gonic/gin"
@@ -75,7 +77,7 @@ func statsHandler(wgService statsProvider, debug bool) gin.HandlerFunc {
 	}
 }
 
-func createPeerHandler(wgService wgPeerService, debug bool) gin.HandlerFunc {
+func createPeerHandler(wgService wgPeerService, m *metrics.Metrics, debug bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req peerRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
@@ -92,7 +94,15 @@ func createPeerHandler(wgService wgPeerService, debug bool) gin.HandlerFunc {
 			return
 		}
 
+		// Time the EnsurePeer call only — JSON parsing/validation is cheap and
+		// not the main signal we care about.
+		start := time.Now()
 		info, err := wgService.EnsurePeer(req.PeerID, expiresAt, req.AddressFamilies)
+		op := metrics.OpCreate
+		if err == nil && info.Rotated {
+			op = metrics.OpRotate
+		}
+		observeOp(m, op, start, err)
 		if err != nil {
 			status, message, reason := peerError(err)
 			slog.Error("peer create failed",
@@ -150,7 +160,7 @@ func createPeerHandler(wgService wgPeerService, debug bool) gin.HandlerFunc {
 	}
 }
 
-func deletePeerHandler(wgService wgPeerService, debug bool) gin.HandlerFunc {
+func deletePeerHandler(wgService wgPeerService, m *metrics.Metrics, debug bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		peerID := c.Param("peerId")
 		if !IsUUIDv4(peerID) {
@@ -158,7 +168,9 @@ func deletePeerHandler(wgService wgPeerService, debug bool) gin.HandlerFunc {
 			return
 		}
 
+		start := time.Now()
 		allowedIPs, err := wgService.DeletePeer(peerID)
+		observeOp(m, metrics.OpDelete, start, err)
 		if err != nil {
 			status, message, reason := peerError(err)
 			slog.Error("peer delete failed",
@@ -282,6 +294,40 @@ func formatExpiresAtForLog(t *time.Time) string {
 		return "permanent"
 	}
 	return t.UTC().Format(time.RFC3339)
+}
+
+// observeOp records a peer-operation outcome to metrics. nil m disables
+// metrics entirely (no allocations, no method calls).
+func observeOp(m *metrics.Metrics, op string, start time.Time, err error) {
+	if m == nil {
+		return
+	}
+	m.PeerOps.WithLabelValues(op, resultLabel(err)).Inc()
+	m.OpDuration.WithLabelValues(op).Observe(time.Since(start).Seconds())
+}
+
+// resultLabel maps a peer-operation error to the bounded set of result
+// labels exposed to Prometheus. Unmatched errors fall through to a generic
+// "internal" label so that cardinality stays fixed.
+func resultLabel(err error) string {
+	if err == nil {
+		return metrics.ResultSuccess
+	}
+	switch {
+	case errors.Is(err, wireguard.ErrNoAvailableIP):
+		return metrics.ResultErrorNoIP
+	case errors.Is(err, wireguard.ErrUnsupportedAddressFamily):
+		return metrics.ResultErrorUnsupportedFam
+	case errors.Is(err, wireguard.ErrPeerNotFound):
+		return metrics.ResultErrorNotFound
+	case strings.Contains(err.Error(), "save peer store"):
+		// Persist failures wrap with this prefix in wireguard.errSavePeerStoreFmt.
+		// Substring match keeps this contract loose: a sentinel error would be
+		// stricter, but the prefix is specific enough that false positives are
+		// effectively impossible.
+		return metrics.ResultErrorPersist
+	}
+	return metrics.ResultErrorInternal
 }
 
 // parseExpiresAt parses optional RFC3339 date. If nil or empty, returns (nil, nil).

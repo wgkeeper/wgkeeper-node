@@ -14,6 +14,9 @@ services:
     ports:
       - "51820:51820/udp"
       - "51821:51821"
+      # Do NOT publish the metrics port (e.g. 9090) on the host.
+      # Keep /metrics inside the Docker network — let Prometheus scrape
+      # via the service name. See README → Metrics for an example.
     sysctls:
       - net.ipv4.conf.all.src_valid_mark=1
       - net.ipv4.ip_forward=1
@@ -26,6 +29,22 @@ services:
       timeout: 3s
       retries: 3
       start_period: 15s
+
+  # Optional: Prometheus to scrape wireguard:9090 inside this network.
+  # Enable `metrics:` in config.yaml first. Generate the token with:
+  #   openssl rand -hex 32 > ./wgkeeper-token
+  # Do NOT publish 9090 on the host — scrape only from inside Docker network.
+  #
+  # prometheus:
+  #   image: prom/prometheus:v3.1.0
+  #   restart: unless-stopped
+  #   volumes:
+  #     - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+  #     - ./wgkeeper-token:/etc/prometheus/wgkeeper-token:ro
+  #     - prometheus_data:/prometheus
+
+# volumes:
+#   prometheus_data:
 
 networks:
   default:

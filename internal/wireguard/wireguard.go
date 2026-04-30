@@ -38,6 +38,11 @@ const (
 	// operation (ConfigureDevice). If the kernel module becomes unresponsive,
 	// this prevents HTTP handlers from hanging indefinitely.
 	wgOpTimeout = 10 * time.Second
+	// HandshakeStaleThreshold defines the cutoff for "stale" peers reported
+	// via WireGuardSnapshot. Distinct from activePeerWindow on purpose: stale
+	// is a looser signal for monitoring (peer is degraded but maybe alive),
+	// active is a tighter "currently passing traffic" definition for /stats.
+	HandshakeStaleThreshold = 5 * time.Minute
 )
 
 var serverStart = time.Now()
@@ -55,6 +60,26 @@ type PeerInfo struct {
 	Rotated bool
 }
 
+// RollbackObserver receives notifications about write-ahead persist rollback
+// events. The wireguard package depends on this interface only to keep the
+// metrics package out of service code; in production it is implemented by
+// *metrics.Metrics. nil observer means metrics are disabled — no allocations,
+// no calls.
+type RollbackObserver interface {
+	// OnPersistRollback fires when configureDevice failed and the bbolt write
+	// was rolled back successfully. op is "create" or "rotate".
+	OnPersistRollback(op string)
+	// OnPersistRollbackFailed fires when the rollback itself errored — bbolt
+	// holds a record that startup reconcile will install on the device next
+	// run. This is the alert-the-on-call path.
+	OnPersistRollbackFailed()
+}
+
+const (
+	rollbackOpCreate = "create"
+	rollbackOpRotate = "rotate"
+)
+
 type WireGuardService struct {
 	client      wgClient
 	deviceName  string
@@ -64,6 +89,9 @@ type WireGuardService struct {
 	serverIP6   net.IP
 	store       *PeerStore
 	persistPath string // if set, peer store is persisted to this file
+	// rollbackObs receives persist-rollback notifications when set. May be nil
+	// (metrics disabled). All call sites must nil-check before invoking.
+	rollbackObs RollbackObserver
 	// mu serializes operations that modify WireGuard device and peer store together
 	mu sync.Mutex
 	// lastAllocated4/6 are ring-buffer hints for IP allocation: the next search
@@ -133,6 +161,42 @@ type PeerDetail struct {
 	PeerListItem
 	ReceiveBytes  int64 `json:"receiveBytes"`
 	TransmitBytes int64 `json:"transmitBytes"`
+}
+
+// WireGuardSnapshot is an aggregated view of kernel-level WireGuard state for
+// observability. Per-peer breakdown is intentionally absent — exposing it as
+// labelled metrics would blow up cardinality on any non-trivial deployment.
+type WireGuardSnapshot struct {
+	// ReceiveBytesTotal is the sum of ReceiveBytes across all peers as
+	// reported by the kernel via netlink. Monotonically increasing under
+	// normal operation; resets when the interface is recreated.
+	ReceiveBytesTotal int64
+	// TransmitBytesTotal mirrors ReceiveBytesTotal for transmitted bytes.
+	TransmitBytesTotal int64
+	// StalePeers counts peers whose last handshake is older than
+	// HandshakeStaleThreshold or has never happened. Gauge — useful as a
+	// degradation signal independent of the tighter "active" peer count
+	// surfaced by /stats.
+	StalePeers int
+}
+
+// WireGuardSnapshot returns aggregated kernel-level metrics. Reuses the
+// short-lived device cache so a tight scrape interval does not hammer netlink.
+func (s *WireGuardService) WireGuardSnapshot() (WireGuardSnapshot, error) {
+	dev, err := s.cachedDevice()
+	if err != nil {
+		return WireGuardSnapshot{}, err
+	}
+	now := time.Now()
+	var snap WireGuardSnapshot
+	for _, p := range dev.Peers {
+		snap.ReceiveBytesTotal += p.ReceiveBytes
+		snap.TransmitBytesTotal += p.TransmitBytes
+		if p.LastHandshakeTime.IsZero() || now.Sub(p.LastHandshakeTime) > HandshakeStaleThreshold {
+			snap.StalePeers++
+		}
+	}
+	return snap, nil
 }
 
 func NewWireGuardService(cfg config.Config) (*WireGuardService, error) {
@@ -317,6 +381,24 @@ func (s *WireGuardService) recordAllowedIPsInSubnets(rec PeerRecord) bool {
 // Close releases resources held by the service, including the peer store DB.
 func (s *WireGuardService) Close() error {
 	return s.store.Close()
+}
+
+// SetRollbackObserver attaches a RollbackObserver to the service. Call before
+// the service handles requests. Not safe to swap under concurrent traffic.
+func (s *WireGuardService) SetRollbackObserver(obs RollbackObserver) {
+	s.rollbackObs = obs
+}
+
+// notifyRollback is a nil-safe wrapper used in createPeer/rotatePeer.
+func (s *WireGuardService) notifyRollback(op string, rollbackErr error) {
+	if s.rollbackObs == nil {
+		return
+	}
+	if rollbackErr != nil {
+		s.rollbackObs.OnPersistRollbackFailed()
+		return
+	}
+	s.rollbackObs.OnPersistRollback(op)
 }
 
 // configureDevice wraps client.ConfigureDevice with a hard timeout so that a
@@ -525,10 +607,12 @@ func (s *WireGuardService) createPeer(peerID string, expiresAt *time.Time, addre
 		// in bbolt as an orphan; startup reconcile will install it on the
 		// device next time and it becomes a normal (unused) peer the operator
 		// can delete via the API.
-		if rbErr := s.store.PersistDeleteBatch(peerID); rbErr != nil {
+		rbErr := s.store.PersistDeleteBatch(peerID)
+		if rbErr != nil {
 			slog.Error("rollback persist after configureDevice failure",
 				"peerId", peerID, "rollback_error", rbErr, "device_error", err)
 		}
+		s.notifyRollback(rollbackOpCreate, rbErr)
 		s.releaseAllocatedIPs(allowedIPs)
 		return PeerInfo{}, err
 	}
@@ -846,10 +930,12 @@ func (s *WireGuardService) rotatePeer(peerID string, record PeerRecord, expiresA
 		// bbolt holds the new key while the device still has the old one.
 		// Startup reconcile will then install the new key — orphaning the old
 		// peer on the device is impossible because we did not configureDevice.
-		if rbErr := s.store.PersistPut(record); rbErr != nil {
+		rbErr := s.store.PersistPut(record)
+		if rbErr != nil {
 			slog.Error("rollback persist after rotation failure",
 				"peerId", peerID, "rollback_error", rbErr, "device_error", err)
 		}
+		s.notifyRollback(rollbackOpRotate, rbErr)
 		return PeerInfo{}, err
 	}
 

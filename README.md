@@ -37,6 +37,7 @@ WGKeeper Node runs a WireGuard interface on a Linux host and exposes a **REST AP
 - [Performance benchmarks](#performance-benchmarks)
 - [API reference](#api-reference)
 - [Peer store persistence](#peer-store-persistence)
+- [Metrics](#metrics)
 - [Testing](#testing)
 - [Trademark](#trademark)
 
@@ -305,6 +306,86 @@ By default, peer state is in-memory only and is lost on restart. Enable persiste
 | Peer expires (`expiresAt` reached) | Removed automatically by a background goroutine; no orchestrator action required |
 
 **Storage format:** bbolt database file with peer records keyed by `peer_id` and containing `public_key`, `preshared_key`, `allowed_ips`, `created_at`, and optional `expires_at`. Private keys are never stored. The DB file is created with mode `0600` — create its directory with tight permissions.
+
+## Metrics
+
+Optional Prometheus `/metrics` endpoint. Off by default. When enabled it runs on its own HTTP listener with mandatory bearer auth, separate from the API key.
+
+### Configuration
+
+```yaml
+metrics:
+  port: 9090
+  token: "<32+ random chars; generate with openssl rand -hex 32>"
+```
+
+Both fields are required when enabled. `token` **must** differ from `auth.api_key` — startup fails otherwise. Token shorter than 32 characters is rejected.
+
+### What's exposed
+
+| Metric | Type | Labels | Use |
+|--------|------|--------|-----|
+| `wgkeeper_peers` | gauge | `state="possible\|issued\|active"` | capacity / utilisation |
+| `wgkeeper_peer_operations_total` | counter | `op`, `result` | error rate, throughput |
+| `wgkeeper_peer_operation_duration_seconds` | histogram | `op` | p99 latency |
+| `wgkeeper_persist_rollback_total` | counter | `op` | crash-safety rollbacks fired |
+| `wgkeeper_persist_rollback_failed_total` | counter | — | **page on this** — bbolt holds a record device-write rolled back from |
+| `wgkeeper_wireguard_rx_bytes_total` | counter | — | total received bytes across all peers |
+| `wgkeeper_wireguard_tx_bytes_total` | counter | — | total transmitted bytes across all peers |
+| `wgkeeper_wireguard_stale_peers` | gauge | — | peers with no handshake in last 5 min (degradation signal) |
+| `process_*`, `go_*` | — | — | standard process and Go runtime |
+
+### ⚠️ Do not publish the metrics port on the host
+
+In Docker, **never** add `9090:9090` to `ports:`. Operational signal (peer counts, version, capacity) on the public internet without mTLS is a recon channel. Keep the endpoint inside the Docker network and let Prometheus scrape via service name.
+
+### Pattern: Prometheus in the same compose
+
+```yaml
+# config.yaml
+metrics:
+  port: 9090
+  token: "<your token>"
+```
+
+```yaml
+# docker-compose.local.yml — uncomment the prometheus block
+prometheus:
+  image: prom/prometheus:v3.1.0
+  volumes:
+    - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    - ./wgkeeper-token:/etc/prometheus/wgkeeper-token:ro
+  # No `ports:` — scrape only from inside Docker network.
+```
+
+Token file:
+```bash
+openssl rand -hex 32 | tee ./wgkeeper-token
+# (paste the same value into config.yaml's metrics.token)
+```
+
+Sample [`prometheus.yml`](docs/prometheus.example.yml) is in `docs/`.
+
+### Pattern: production with Caddy
+
+The `docker-compose.prod-secure.yml` setup keeps the REST API behind Caddy and never publishes it on the host. The same applies to `/metrics` — leave it on the internal network. For external scraping, either:
+
+- run Prometheus in the same compose (recommended), or
+- add a separate Caddy site (e.g. `metrics.example.com`) with **client cert auth (mTLS)** that proxies to `wireguard:9090`.
+
+Do not expose `/metrics` over the public internet behind only the bearer token.
+
+### Pattern: bare metal / loopback
+
+Bind to localhost so only same-host scrapers (typically a node-exporter sidecar or `prometheus-agent`) can reach it:
+
+```yaml
+metrics:
+  port: 9090
+  token: "<your token>"
+```
+
+The endpoint binds on all interfaces inside the host or container; on bare metal pair this with a firewall rule limiting `9090/tcp` to `127.0.0.1`.
 
 ## Testing
 
