@@ -1,6 +1,6 @@
 services:
   wireguard:
-    image: ghcr.io/wgkeeper/node:1.3.0
+    image: ghcr.io/wgkeeper/node
     restart: always
     cap_add:
       - NET_ADMIN
