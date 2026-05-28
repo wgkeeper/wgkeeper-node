@@ -7,6 +7,13 @@ server:
   # allowed_ips:
   #   - "10.0.0.0/24"
   #   - "fd00::1"
+  # Optional: reverse-proxy IPs/CIDRs allowed to set X-Forwarded-For. Empty = trust
+  # only loopback (127.0.0.1, ::1). When the node sits behind a NON-loopback proxy
+  # (e.g. a Caddy container reaching it over the docker bridge), list that proxy's
+  # network here — otherwise allowed_ips and rate limiting see the proxy IP, not the
+  # real client. For docker-compose.prod-secure.yml use the bridge subnet:
+  # trusted_proxies:
+  #   - "172.18.0.0/16"
 auth:
   api_key: "changeme"
 wireguard:

@@ -235,7 +235,7 @@ func isFatalServerError(err error) bool {
 func newHTTPServer(ctx context.Context, cfg config.Config, addr string, wgService *wireguard.WireGuardService, m *metrics.Metrics, debug bool) *http.Server {
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           server.NewRouter(ctx, cfg.APIKey, cfg.AllowedNets, wgService, m, debug),
+		Handler:           server.NewRouter(ctx, cfg.APIKey, cfg.AllowedNets, cfg.TrustedProxies, wgService, m, debug),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,

@@ -14,13 +14,24 @@ import (
 
 const debugKey = "debug"
 
+// defaultTrustedProxies is used when no trusted proxies are configured: only
+// loopback is trusted to set X-Forwarded-For, preventing header spoofing from
+// external clients.
+var defaultTrustedProxies = []string{"127.0.0.1", "::1"}
+
 // NewRouter builds the API router. m is optional — pass nil when metrics are
-// disabled; handlers nil-check before recording.
-func NewRouter(ctx context.Context, apiKey string, allowedNets []*net.IPNet, wgService *wireguard.WireGuardService, m *metrics.Metrics, debug bool) *gin.Engine {
+// disabled; handlers nil-check before recording. trustedProxies lists the
+// reverse-proxy IPs/CIDRs allowed to set X-Forwarded-For; empty trusts only
+// loopback (see defaultTrustedProxies). A non-loopback proxy (e.g. a Caddy
+// container) must be listed here, otherwise allowed_ips and per-IP rate
+// limiting see the proxy address instead of the real client.
+func NewRouter(ctx context.Context, apiKey string, allowedNets []*net.IPNet, trustedProxies []string, wgService *wireguard.WireGuardService, m *metrics.Metrics, debug bool) *gin.Engine {
 	router := gin.New()
-	// Trust only loopback proxies (e.g. Caddy on the same host).
-	// This prevents X-Forwarded-For spoofing from external clients.
-	if err := router.SetTrustedProxies([]string{"127.0.0.1", "::1"}); err != nil {
+	proxies := trustedProxies
+	if len(proxies) == 0 {
+		proxies = defaultTrustedProxies
+	}
+	if err := router.SetTrustedProxies(proxies); err != nil {
 		panic(fmt.Sprintf("set trusted proxies: %v", err))
 	}
 	router.Use(requestIDMiddleware())

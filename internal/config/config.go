@@ -34,19 +34,25 @@ const (
 )
 
 type Config struct {
-	Port          int
-	APIKey        string
-	TLSCertFile   string       // path to TLS certificate (PEM); if set, TLSKeyFile must be set too
-	TLSKeyFile    string       // path to TLS private key (PEM)
-	AllowedNets   []*net.IPNet // optional: if non-empty, only these IPs/CIDRs may reach the API
-	WGInterface   string
-	WGSubnet      string // IPv4 CIDR (optional if WGSubnet6 is set)
-	WGServerIP    string // IPv4 server address (optional)
-	WGSubnet6     string // IPv6 CIDR (optional if WGSubnet is set)
-	WGServerIP6   string // IPv6 server address (optional)
-	WGListenPort  int
-	WANInterface  string
-	PeerStoreFile string // optional: path to bbolt DB file for persistent peer store; empty = in-memory only
+	Port        int
+	APIKey      string
+	TLSCertFile string       // path to TLS certificate (PEM); if set, TLSKeyFile must be set too
+	TLSKeyFile  string       // path to TLS private key (PEM)
+	AllowedNets []*net.IPNet // optional: if non-empty, only these IPs/CIDRs may reach the API
+	// TrustedProxies lists the reverse-proxy IPs/CIDRs whose X-Forwarded-For
+	// header is trusted to carry the real client IP. Empty = trust only loopback
+	// (127.0.0.1, ::1). Set this to the network of a non-loopback reverse proxy
+	// (e.g. a Caddy container's docker-bridge subnet) so that allowed_ips and
+	// per-IP rate limiting see the real client instead of the proxy address.
+	TrustedProxies []string
+	WGInterface    string
+	WGSubnet       string // IPv4 CIDR (optional if WGSubnet6 is set)
+	WGServerIP     string // IPv4 server address (optional)
+	WGSubnet6      string // IPv6 CIDR (optional if WGSubnet is set)
+	WGServerIP6    string // IPv6 server address (optional)
+	WGListenPort   int
+	WANInterface   string
+	PeerStoreFile  string // optional: path to bbolt DB file for persistent peer store; empty = in-memory only
 
 	// MetricsPort is the TCP port for the optional Prometheus /metrics
 	// endpoint. Zero disables the endpoint entirely (no listener is created).
@@ -77,10 +83,11 @@ type wireguardRouting struct {
 
 type fileConfig struct {
 	Server struct {
-		Port       string   `yaml:"port"`
-		TLSCert    string   `yaml:"tls_cert"`
-		TLSKey     string   `yaml:"tls_key"`
-		AllowedIPs []string `yaml:"allowed_ips"`
+		Port           string   `yaml:"port"`
+		TLSCert        string   `yaml:"tls_cert"`
+		TLSKey         string   `yaml:"tls_key"`
+		AllowedIPs     []string `yaml:"allowed_ips"`
+		TrustedProxies []string `yaml:"trusted_proxies"`
 	} `yaml:"server"`
 	Auth struct {
 		APIKey string `yaml:"api_key"`
@@ -134,7 +141,7 @@ func loadConfigFile(path string) (Config, error) {
 	if err := yaml.Unmarshal(raw, &fc); err != nil {
 		return Config{}, fmt.Errorf("parse config: %w", err)
 	}
-	portValue, apiKey, tlsCert, tlsKey, allowedNets, err := parseServerAndAuth(fc)
+	portValue, apiKey, tlsCert, tlsKey, allowedNets, trustedProxies, err := parseServerAndAuth(fc)
 	if err != nil {
 		return Config{}, err
 	}
@@ -152,6 +159,7 @@ func loadConfigFile(path string) (Config, error) {
 		TLSCertFile:       tlsCert,
 		TLSKeyFile:        tlsKey,
 		AllowedNets:       allowedNets,
+		TrustedProxies:    trustedProxies,
 		WGInterface:       wgInterface,
 		WGSubnet:          wgSubnet,
 		WGServerIP:        wgServerIP,
@@ -220,27 +228,59 @@ func (c Config) MetricsAddr() string {
 	return fmt.Sprintf(":%d", c.MetricsPort)
 }
 
-func parseServerAndAuth(fc fileConfig) (portValue int, apiKey, tlsCert, tlsKey string, allowedNets []*net.IPNet, err error) {
+func parseServerAndAuth(fc fileConfig) (portValue int, apiKey, tlsCert, tlsKey string, allowedNets []*net.IPNet, trustedProxies []string, err error) {
 	portValue, err = parsePort("server.port", fc.Server.Port)
 	if err != nil {
-		return 0, "", "", "", nil, err
+		return 0, "", "", "", nil, nil, err
 	}
 	apiKey, err = requireString("auth.api_key", fc.Auth.APIKey)
 	if err != nil {
-		return 0, "", "", "", nil, err
+		return 0, "", "", "", nil, nil, err
 	}
 	if len(apiKey) < minAPIKeyLength {
-		return 0, "", "", "", nil, fmt.Errorf("auth.api_key must be at least %d characters", minAPIKeyLength)
+		return 0, "", "", "", nil, nil, fmt.Errorf("auth.api_key must be at least %d characters", minAPIKeyLength)
 	}
 	tlsCert, tlsKey, err = parseOptionalTLS(fc.Server.TLSCert, fc.Server.TLSKey)
 	if err != nil {
-		return 0, "", "", "", nil, err
+		return 0, "", "", "", nil, nil, err
 	}
 	allowedNets, err = parseAllowedIPs("server.allowed_ips", fc.Server.AllowedIPs)
 	if err != nil {
-		return 0, "", "", "", nil, err
+		return 0, "", "", "", nil, nil, err
 	}
-	return portValue, apiKey, tlsCert, tlsKey, allowedNets, nil
+	trustedProxies, err = parseTrustedProxies("server.trusted_proxies", fc.Server.TrustedProxies)
+	if err != nil {
+		return 0, "", "", "", nil, nil, err
+	}
+	return portValue, apiKey, tlsCert, tlsKey, allowedNets, trustedProxies, nil
+}
+
+// parseTrustedProxies validates each entry as an IP address or CIDR and returns
+// the trimmed entries unchanged (gin's SetTrustedProxies consumes raw strings).
+// Returns nil for an empty/absent list — the router then trusts only loopback.
+func parseTrustedProxies(field string, entries []string) ([]string, error) {
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	out := make([]string, 0, len(entries))
+	for i, raw := range entries {
+		s := strings.TrimSpace(raw)
+		if s == "" {
+			continue
+		}
+		if strings.Contains(s, "/") {
+			if _, _, err := net.ParseCIDR(s); err != nil {
+				return nil, fmt.Errorf("%s[%d]: invalid CIDR %q: %w", field, i, s, err)
+			}
+		} else if net.ParseIP(s) == nil {
+			return nil, fmt.Errorf("%s[%d]: invalid IP address %q", field, i, s)
+		}
+		out = append(out, s)
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
 }
 
 func parseWireGuard(fc fileConfig) (wgSubnet, wgSubnet6, wgInterface, wgServerIP, wgServerIP6, wanInterface string, wgListenPort int, peerStoreFile string, err error) {

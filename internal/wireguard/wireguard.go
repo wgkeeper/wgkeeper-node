@@ -1055,6 +1055,10 @@ func (s *WireGuardService) allocateIPs(families []string) ([]net.IPNet, error) {
 	if wantIPv6 && s.subnet6 != nil {
 		ipNet, err := allocateOneIPv6(s.subnet6, s.usedIPs, &s.lastAllocated6)
 		if err != nil {
+			// Release any address already reserved for an earlier family so a
+			// partially-successful dual-stack allocation does not leak an IPv4
+			// into usedIPs when the IPv6 pool is exhausted.
+			s.releaseAllocatedIPs(out)
 			return nil, err
 		}
 		out = append(out, ipNet)

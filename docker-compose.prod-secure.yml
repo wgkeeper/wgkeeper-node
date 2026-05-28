@@ -36,8 +36,14 @@ services:
 
   caddy:
     # Production reverse proxy: the only public HTTP(S) entrypoint.
-    # Combine with server.allowed_ips and auth.api_key in config.yaml,
-    # and restrict 80/443 on the host via firewall / security group.
+    # Combine with auth.api_key in config.yaml and restrict 80/443 on the host
+    # via firewall / security group.
+    #
+    # NOTE: Caddy reaches the API over the docker bridge below (not loopback),
+    # so if you use server.allowed_ips you MUST also set server.trusted_proxies
+    # to the bridge subnet (172.18.0.0/16) — otherwise allowed_ips compares your
+    # orchestrator's IP against Caddy's container IP and rejects every request.
+    # See README → Deployment → production with Caddy.
     image: caddy:2
     restart: unless-stopped
     depends_on:

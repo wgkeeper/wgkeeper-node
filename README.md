@@ -64,7 +64,7 @@ flowchart LR
 |-----------|---------|
 | **API key auth** | All protected endpoints require `X-API-Key`; `/healthz` and `/readyz` are public |
 | **IP allowlist** | `server.allowed_ips` — optional; when configured, acts as an independent layer on top of API key auth so a request must pass both checks |
-| **Trusted proxies** | Only `127.0.0.1` and `::1` are trusted as reverse proxies, preventing `X-Forwarded-For` spoofing from external clients |
+| **Trusted proxies** | By default only `127.0.0.1` and `::1` are trusted as reverse proxies, preventing `X-Forwarded-For` spoofing from external clients. Set `server.trusted_proxies` to a non-loopback proxy's network (e.g. a Caddy container's docker-bridge subnet) so `allowed_ips` and rate limiting evaluate the real client IP — see [Deployment](#docker-compose--production-with-caddy) |
 | **Rate limiting** | 20 req/s per client IP, burst 30; automatically disabled when an allowlist is configured |
 | **Body limit** | 256 KB maximum; larger requests get `413 Request Entity Too Large` |
 | **Input validation** | Pagination `offset` must be ≥ 0 and `limit` between 1–1000; invalid values return `400 Bad Request` |
@@ -118,7 +118,8 @@ NODE_CONFIG=/path/to/config.yaml
 | `server.port` | API port (HTTP, or HTTPS if TLS is configured) |
 | `server.tls_cert` | Path to TLS certificate PEM file; must be set together with `tls_key` |
 | `server.tls_key` | Path to TLS private key PEM file; must be set together with `tls_cert` |
-| `server.allowed_ips` | Optional IPv4/IPv6 addresses or CIDRs; when set, only these IPs can call protected endpoints |
+| `server.allowed_ips` | Optional IPv4/IPv6 addresses or CIDRs; when set, only these IPs can call protected endpoints. Behind a non-loopback reverse proxy this is evaluated against the real client only if `server.trusted_proxies` lists the proxy |
+| `server.trusted_proxies` | Optional IPv4/IPv6 addresses or CIDRs of reverse proxies allowed to set `X-Forwarded-For`; empty trusts only loopback. Required for `allowed_ips`/rate limiting to see the real client behind a separate proxy container |
 | `auth.api_key` | API key for all protected endpoints |
 
 ### WireGuard
@@ -175,9 +176,19 @@ docker compose -f docker-compose.prod-secure.yml up -d
 **Recommended settings for production:**
 
 - Use a long, random `auth.api_key`.
-- Set `server.allowed_ips` to your orchestrator's IPs — only those can call protected endpoints.
-- Restrict ports `80` and `443` at the firewall to your orchestrator only.
+- Restrict ports `80` and `443` at the firewall to your orchestrator only — this is the primary network control in this topology.
 - Point a domain at the node (e.g. `api.example.com`) for automatic HTTPS via Let's Encrypt.
+- **If you use `server.allowed_ips` behind Caddy, also set `server.trusted_proxies`.** Caddy runs as a separate container and reaches the API over the docker bridge, so by default the node trusts only loopback and `allowed_ips` would compare your orchestrator's IP against Caddy's container address (locking everything out). List the bridge subnet so the real client IP is read from `X-Forwarded-For`:
+
+  ```yaml
+  server:
+    allowed_ips:
+      - "203.0.113.7"        # your orchestrator's real IP
+    trusted_proxies:
+      - "172.18.0.0/16"      # docker bridge where Caddy runs (see networks: in the compose file)
+  ```
+
+  Without a trusted-proxy entry, rely on the firewall rule above rather than `allowed_ips`.
 
 **Example `Caddyfile`:**
 

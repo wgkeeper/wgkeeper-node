@@ -1,6 +1,7 @@
 package wireguard
 
 import (
+	"errors"
 	"net"
 	"testing"
 )
@@ -158,6 +159,54 @@ func TestAllocateOneIPv6AllUsed(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected ErrNoAvailableIP when all IPs are used")
 	}
+}
+
+// TestEnsurePeerDualStackIPv6ExhaustionReleasesIPv4 guards against a regression
+// where a dual-stack create that succeeds on IPv4 but fails on IPv6 (exhausted
+// pool) leaks the already-reserved IPv4 into usedIPs. A failed create must
+// reserve nothing.
+func TestEnsurePeerDualStackIPv6ExhaustionReleasesIPv4(t *testing.T) {
+	_, subnet4, _ := net.ParseCIDR("10.0.0.0/28") // .1 .. .14 usable
+	_, subnet6, _ := net.ParseCIDR("fd00::/126")  // fd00::1, fd00::2 usable (2 total)
+	svc := &WireGuardService{
+		client:     FakeClient{},
+		deviceName: "wg0",
+		subnet4:    subnet4,
+		subnet6:    subnet6,
+		store:      NewPeerStore(),
+	}
+	both := []string{FamilyIPv4, FamilyIPv6}
+
+	// Consume both IPv6 addresses with two dual-stack peers.
+	if _, err := svc.EnsurePeer("11111111-1111-4111-8111-111111111111", nil, both); err != nil {
+		t.Fatalf("peer A create: %v", err)
+	}
+	if _, err := svc.EnsurePeer("22222222-2222-4222-8222-222222222222", nil, both); err != nil {
+		t.Fatalf("peer B create: %v", err)
+	}
+
+	usedIPv4Before := countUsedIPv4(svc)
+
+	// IPv4 free, IPv6 exhausted → must fail and reserve nothing.
+	if _, err := svc.EnsurePeer("33333333-3333-4333-8333-333333333333", nil, both); !errors.Is(err, ErrNoAvailableIP) {
+		t.Fatalf("expected ErrNoAvailableIP, got %v", err)
+	}
+
+	if got := countUsedIPv4(svc); got != usedIPv4Before {
+		t.Errorf("failed dual-stack create leaked an IPv4: usedIPv4 %d -> %d (peers=%d)",
+			usedIPv4Before, got, svc.store.Len())
+	}
+}
+
+// countUsedIPv4 counts IPv4 addresses currently reserved in the allocator cache.
+func countUsedIPv4(svc *WireGuardService) int {
+	n := 0
+	for k := range svc.usedIPs {
+		if ip := net.ParseIP(k); ip != nil && ip.To4() != nil {
+			n++
+		}
+	}
+	return n
 }
 
 func TestAppendIfNotPresent(t *testing.T) {

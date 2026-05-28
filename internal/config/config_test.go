@@ -156,6 +156,79 @@ wireguard:
 	}
 }
 
+func TestLoadConfigTrustedProxies(t *testing.T) {
+	path := writeConfigFile(t, `
+server:
+  port: "51821"
+  trusted_proxies:
+    - "172.18.0.0/16"
+    - "10.1.2.3"
+auth:
+  api_key: "test-api-key-secure-key-longer!!"
+wireguard:
+  interface: "wg0"
+  subnet: "10.0.0.0/24"
+  listen_port: 51820
+  routing:
+    wan_interface: "eth0"
+`)
+	t.Setenv("NODE_CONFIG", path)
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf(msgExpectedNoError, err)
+	}
+	if len(cfg.TrustedProxies) != 2 || cfg.TrustedProxies[0] != "172.18.0.0/16" || cfg.TrustedProxies[1] != "10.1.2.3" {
+		t.Fatalf("unexpected trusted proxies: %v", cfg.TrustedProxies)
+	}
+}
+
+func TestLoadConfigTrustedProxiesInvalid(t *testing.T) {
+	path := writeConfigFile(t, `
+server:
+  port: "51821"
+  trusted_proxies:
+    - "not-an-ip"
+auth:
+  api_key: "test-api-key-secure-key-longer!!"
+wireguard:
+  interface: "wg0"
+  subnet: "10.0.0.0/24"
+  listen_port: 51820
+  routing:
+    wan_interface: "eth0"
+`)
+	t.Setenv("NODE_CONFIG", path)
+
+	if _, err := LoadConfig(); err == nil {
+		t.Fatalf("expected error for invalid trusted_proxies entry")
+	}
+}
+
+func TestLoadConfigNoTrustedProxies(t *testing.T) {
+	path := writeConfigFile(t, `
+server:
+  port: "51821"
+auth:
+  api_key: "test-api-key-secure-key-longer!!"
+wireguard:
+  interface: "wg0"
+  subnet: "10.0.0.0/24"
+  listen_port: 51820
+  routing:
+    wan_interface: "eth0"
+`)
+	t.Setenv("NODE_CONFIG", path)
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf(msgExpectedNoError, err)
+	}
+	if cfg.TrustedProxies != nil {
+		t.Fatalf("expected nil trusted proxies when unset, got %v", cfg.TrustedProxies)
+	}
+}
+
 func TestLoadConfigIPv6Only(t *testing.T) {
 	path := writeConfigFile(t, `
 server:
