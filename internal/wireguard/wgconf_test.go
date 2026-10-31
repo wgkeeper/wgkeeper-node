@@ -80,7 +80,8 @@ func TestBuildRoutingRules(t *testing.T) {
 		if len(up) == 0 || len(down) == 0 {
 			t.Errorf("expected rules, got up=%v down=%v", up, down)
 		}
-		assertRoutingRulesCount(t, up, down, 3)
+		// 3 FORWARD + 6 blocked destinations + MASQUERADE + 2 INPUT.
+		assertRoutingRulesCount(t, up, down, 12)
 	})
 
 	t.Run("wan_and_subnet6_returns_ip6tables_rules", func(t *testing.T) {
@@ -396,14 +397,15 @@ func TestBuildRoutingRulesWhitespaceOnlyWAN(t *testing.T) {
 }
 
 func TestBuildRoutingRulesBothSubnets(t *testing.T) {
-	// Both IPv4 and IPv6 subnets → 3+3=6 PostUp and 6 PostDown rules.
+	// IPv4: 12 rules (see TestBuildRoutingRules); IPv6: 3 FORWARD + 3 blocked
+	// destinations + MASQUERADE + 2 INPUT = 9.
 	cfg := config.Config{
 		WANInterface: "eth0",
 		WGSubnet:     subnetTestCIDR,
 		WGSubnet6:    subnet6TestCIDR64,
 	}
 	up, down := buildRoutingRules(cfg)
-	assertRoutingRulesCount(t, up, down, 6)
+	assertRoutingRulesCount(t, up, down, 21)
 	joined := strings.Join(up, " ")
 	if !strings.Contains(joined, "iptables") {
 		t.Error("expected iptables rules in PostUp")
@@ -432,5 +434,55 @@ func TestDefaultConfigPath(t *testing.T) {
 	path = defaultConfigPath("wg1")
 	if !strings.Contains(path, "wg1") {
 		t.Errorf("expected wg1 in path, got %q", path)
+	}
+}
+
+// TestBuildRoutingRulesIPv4Exact pins the full IPv4 rule set, so a change to
+// what peers can reach shows up as a reviewable diff.
+func TestBuildRoutingRulesIPv4Exact(t *testing.T) {
+	up, down := buildRoutingRules(config.Config{WANInterface: "eth0", WGSubnet: subnetTestCIDR})
+	wantUp := []string{
+		"iptables -A FORWARD -i %i -o eth0 -s 10.0.0.0/24 -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT",
+		"iptables -A FORWARD -i eth0 -o %i -d 10.0.0.0/24 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
+		"iptables -A FORWARD -i %i -j DROP",
+		"iptables -I FORWARD -i %i -d 169.254.0.0/16 -j DROP",
+		"iptables -I FORWARD -i %i -d 100.100.100.200/32 -j DROP",
+		"iptables -I FORWARD -i %i -d 10.0.0.0/8 -j DROP",
+		"iptables -I FORWARD -i %i -d 172.16.0.0/12 -j DROP",
+		"iptables -I FORWARD -i %i -d 192.168.0.0/16 -j DROP",
+		"iptables -I FORWARD -i %i -d 100.64.0.0/10 -j DROP",
+		"iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o eth0 -j MASQUERADE",
+		"iptables -I INPUT -i %i -j DROP",
+		"iptables -I INPUT -i %i -p icmp -j ACCEPT",
+	}
+	if strings.Join(up, "\n") != strings.Join(wantUp, "\n") {
+		t.Errorf("PostUp mismatch:\ngot:\n%s\nwant:\n%s", strings.Join(up, "\n"), strings.Join(wantUp, "\n"))
+	}
+	// PostDown deletes the same rules in reverse order.
+	for i, rule := range down {
+		want := wantUp[len(wantUp)-1-i]
+		want = strings.Replace(strings.Replace(want, " -A ", " -D ", 1), " -I ", " -D ", 1)
+		if rule != want {
+			t.Errorf("PostDown[%d] = %q, want %q", i, rule, want)
+		}
+	}
+}
+
+func TestBuildRoutingRulesAllowPrivateNetworks(t *testing.T) {
+	cfg := config.Config{WANInterface: "eth0", WGSubnet: subnetTestCIDR, WGSubnet6: subnet6TestCIDR64, AllowPrivateNetworks: true}
+	up, _ := buildRoutingRules(cfg)
+	joined := strings.Join(up, "\n")
+	for _, private := range []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "fc00::/7"} {
+		if strings.Contains(joined, "-d "+private+" -j DROP") {
+			t.Errorf("%s must not be blocked when private networks are allowed", private)
+		}
+	}
+	for _, metadata := range []string{"169.254.0.0/16", "100.100.100.200/32", "fe80::/10", "fd00:ec2::254/128"} {
+		if !strings.Contains(joined, "-d "+metadata+" -j DROP") {
+			t.Errorf("%s must stay blocked even when private networks are allowed", metadata)
+		}
+	}
+	if !strings.Contains(joined, "-i %i -j DROP") {
+		t.Error("peer-to-peer and other-interface traffic must stay blocked")
 	}
 }

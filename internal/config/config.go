@@ -29,16 +29,20 @@ const (
 )
 
 type Config struct {
-	Port          int
-	APIKey        string
-	WGInterface   string
-	WGSubnet      string // IPv4 CIDR (optional if WGSubnet6 is set)
-	WGServerIP    string // IPv4 server address (optional)
-	WGSubnet6     string // IPv6 CIDR (optional if WGSubnet is set)
-	WGServerIP6   string // IPv6 server address (optional)
-	WGListenPort  int
-	WANInterface  string
-	PeerStoreFile string // bbolt DB file the peer store is persisted to; always set
+	Port         int
+	APIKey       string
+	WGInterface  string
+	WGSubnet     string // IPv4 CIDR (optional if WGSubnet6 is set)
+	WGServerIP   string // IPv4 server address (optional)
+	WGSubnet6    string // IPv6 CIDR (optional if WGSubnet is set)
+	WGServerIP6  string // IPv6 server address (optional)
+	WGListenPort int
+	WANInterface string
+	// AllowPrivateNetworks lets peers reach private and shared address space
+	// (10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7) through the node.
+	// Off by default: peers get internet access only.
+	AllowPrivateNetworks bool
+	PeerStoreFile        string // bbolt DB file the peer store is persisted to; always set
 
 	// MetricsPort is the TCP port for the optional Prometheus /metrics
 	// endpoint. Zero disables the endpoint entirely (no listener is created).
@@ -52,7 +56,8 @@ type Config struct {
 }
 
 type wireguardRouting struct {
-	WANInterface string `yaml:"wan_interface"`
+	WANInterface         string `yaml:"wan_interface"`
+	AllowPrivateNetworks bool   `yaml:"allow_private_networks"`
 }
 
 type fileConfig struct {
@@ -135,18 +140,19 @@ func loadConfigFile(path string) (Config, error) {
 		return Config{}, err
 	}
 	return Config{
-		Port:          portValue,
-		APIKey:        apiKey,
-		WGInterface:   wgInterface,
-		WGSubnet:      wgSubnet,
-		WGServerIP:    wgServerIP,
-		WGSubnet6:     wgSubnet6,
-		WGServerIP6:   wgServerIP6,
-		WGListenPort:  wgListenPort,
-		WANInterface:  wanInterface,
-		PeerStoreFile: peerStoreFile,
-		MetricsPort:   metricsPort,
-		MetricsToken:  metricsToken,
+		Port:                 portValue,
+		APIKey:               apiKey,
+		WGInterface:          wgInterface,
+		WGSubnet:             wgSubnet,
+		WGServerIP:           wgServerIP,
+		WGSubnet6:            wgSubnet6,
+		WGServerIP6:          wgServerIP6,
+		WGListenPort:         wgListenPort,
+		WANInterface:         wanInterface,
+		AllowPrivateNetworks: fc.WireGuard.Routing.AllowPrivateNetworks,
+		PeerStoreFile:        peerStoreFile,
+		MetricsPort:          metricsPort,
+		MetricsToken:         metricsToken,
 	}, nil
 }
 

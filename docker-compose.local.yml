@@ -4,9 +4,13 @@ services:
     restart: always
     # Graceful shutdown waits for in-flight API requests and the expiry cleanup.
     stop_grace_period: 30s
+    # NET_ADMIN is all the node needs. WireGuard is in the kernel since 5.6;
+    # on older kernels load the module on the host (modprobe wireguard)
+    # instead of granting the container SYS_MODULE.
     cap_add:
       - NET_ADMIN
-      - SYS_MODULE
+    security_opt:
+      - no-new-privileges:true
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - ./wireguard:/etc/wireguard
@@ -28,13 +32,15 @@ services:
       - net.ipv6.conf.all.forwarding=1
       - net.ipv6.conf.default.forwarding=1
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:51821/healthz"]
+      # /readyz also checks the WireGuard interface. The port must match server.port.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:51821/readyz"]
       interval: 10s
       timeout: 3s
       retries: 3
       start_period: 15s
 
-  # Optional: Prometheus to scrape wireguard:9090 inside this network.
+  # Optional: Prometheus to scrape wireguard:9090 inside this network, with
+  # the example config and alerting rules from examples/prometheus.
   # Enable `metrics:` in config.yaml first. Generate the token with:
   #   openssl rand -hex 32 > ./wgkeeper-token
   # Do NOT publish 9090 on the host — scrape only from inside Docker network.
@@ -43,7 +49,8 @@ services:
   #   image: prom/prometheus:v3.1.0
   #   restart: unless-stopped
   #   volumes:
-  #     - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+  #     - ./examples/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+  #     - ./examples/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
   #     - ./wgkeeper-token:/etc/prometheus/wgkeeper-token:ro
   #     - prometheus_data:/prometheus
 

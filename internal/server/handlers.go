@@ -126,6 +126,7 @@ func createPeerHandler(wgService wgPeerService, m *metrics.Metrics) gin.HandlerF
 			"addressFamilies", info.AddressFamilies,
 			"expiresAt", formatExpiresAtForLog(expiresAt),
 			"client_ip", c.ClientIP(),
+			"forwarded_for", forwardedFor(c.Request),
 			"request_id", GetRequestIDFromContext(c.Request.Context()),
 		)
 		// Private and preshared keys must never be cached by proxies or browsers.
@@ -169,6 +170,7 @@ func deletePeerHandler(wgService wgPeerService, m *metrics.Metrics) gin.HandlerF
 			"peerId", peerID,
 			"allowedIPs", allowedIPs,
 			"client_ip", c.ClientIP(),
+			"forwarded_for", forwardedFor(c.Request),
 			"request_id", GetRequestIDFromContext(c.Request.Context()),
 		)
 		c.JSON(http.StatusOK, DeletePeerResponse{Status: "ok"})
@@ -363,6 +365,7 @@ func writeError(c *gin.Context, status int, message, code string, err error, att
 			"status", status,
 			"code", code,
 			"client_ip", c.ClientIP(),
+			"forwarded_for", forwardedFor(c.Request),
 			"error", err,
 		}, attrs...)
 		slog.Log(c.Request.Context(), level, "request failed", args...)

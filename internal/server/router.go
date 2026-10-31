@@ -3,6 +3,7 @@ package server
 import (
 	"fmt"
 	"log/slog"
+	"net/http"
 
 	"github.com/wgkeeper/wgkeeper-node/internal/metrics"
 	"github.com/wgkeeper/wgkeeper-node/internal/wireguard"
@@ -10,11 +11,25 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// loopbackProxies may set X-Forwarded-For: a reverse proxy sharing the node's
-// network namespace (the Caddy setup in docker-compose.prod-secure.yml)
-// connects from loopback. The client IP is only logged; no access decision
-// depends on it.
+// loopbackProxies may set X-Forwarded-For for ClientIP: a proxy on the same
+// host or in the same network namespace. For a proxy anywhere else, the raw
+// header is logged as forwarded_for instead. Client addresses are only ever
+// logged; no access decision depends on them.
 var loopbackProxies = []string{"127.0.0.1", "::1"}
+
+// maxLoggedForwardedFor caps the X-Forwarded-For value written to logs.
+const maxLoggedForwardedFor = 256
+
+// forwardedFor returns the X-Forwarded-For header for logging. It is set by
+// whichever proxy is in front of the node (or by the client itself when there
+// is none), so it is informational only.
+func forwardedFor(r *http.Request) string {
+	v := r.Header.Get("X-Forwarded-For")
+	if len(v) > maxLoggedForwardedFor {
+		v = v[:maxLoggedForwardedFor]
+	}
+	return v
+}
 
 // NewRouter builds the API router. m is optional — pass nil when metrics are
 // disabled; handlers nil-check before recording.
@@ -47,6 +62,7 @@ func NewRouter(apiKey string, wgService *wireguard.WireGuardService, m *metrics.
 			"status", param.StatusCode,
 			"latency", param.Latency,
 			"ip", param.ClientIP,
+			"forwarded_for", forwardedFor(param.Request),
 			"request_id", requestID,
 		)
 		return ""

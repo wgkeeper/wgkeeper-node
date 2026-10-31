@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/wgkeeper/wgkeeper-node/internal/config"
@@ -193,32 +194,92 @@ func buildConfigContent(privateKey string, addressLines []string, listenPort int
 	return sb.String()
 }
 
+// Destinations peers can never reach through the node. Link-local covers
+// cloud instance metadata (169.254.169.254); the explicit addresses are
+// metadata services outside link-local (Alibaba Cloud, AWS IPv6).
+var (
+	alwaysBlocked4 = []string{"169.254.0.0/16", "100.100.100.200/32"}
+	alwaysBlocked6 = []string{"fe80::/10", "fd00:ec2::254/128"}
+
+	// Private and shared address space: the host's LAN, the Docker networks,
+	// other containers, the VPC. Blocked unless
+	// wireguard.routing.allow_private_networks is set.
+	privateNets4 = []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"}
+	privateNets6 = []string{"fc00::/7"}
+)
+
+// fwRule is one iptables rule. PostUp adds it (insert puts it at the top of
+// the chain, ahead of rules other software appended); PostDown deletes it.
+type fwRule struct {
+	table  string
+	chain  string
+	args   string
+	insert bool
+}
+
+// buildRoutingRules returns the PostUp/PostDown iptables rules for each
+// configured address family. Peers may only reach the internet through the
+// WAN interface: traffic to blocked destinations, between peers, to other
+// interfaces, and to the node itself (its API, metrics or any host service)
+// is dropped; only ICMP to the node is allowed.
 func buildRoutingRules(cfg config.Config) (postUp, postDown []string) {
 	wanInterface := strings.TrimSpace(cfg.WANInterface)
 	if wanInterface == "" {
 		return nil, nil
 	}
 	if cfg.WGSubnet != "" {
-		postUp = append(postUp,
-			fmt.Sprintf("iptables -A FORWARD -i %%i -o %s -s %s -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT", wanInterface, cfg.WGSubnet),
-			fmt.Sprintf("iptables -A FORWARD -i %s -o %%i -d %s -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT", wanInterface, cfg.WGSubnet),
-			fmt.Sprintf("iptables -t nat -A POSTROUTING -s %s -o %s -j MASQUERADE", cfg.WGSubnet, wanInterface))
-		postDown = append(postDown,
-			fmt.Sprintf("iptables -D FORWARD -i %%i -o %s -s %s -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT", wanInterface, cfg.WGSubnet),
-			fmt.Sprintf("iptables -D FORWARD -i %s -o %%i -d %s -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT", wanInterface, cfg.WGSubnet),
-			fmt.Sprintf("iptables -t nat -D POSTROUTING -s %s -o %s -j MASQUERADE", cfg.WGSubnet, wanInterface))
+		blocked := alwaysBlocked4
+		if !cfg.AllowPrivateNetworks {
+			blocked = append(slices.Clone(blocked), privateNets4...)
+		}
+		up, down := familyRules("iptables", "icmp", cfg.WGSubnet, wanInterface, blocked)
+		postUp, postDown = append(postUp, up...), append(postDown, down...)
 	}
 	if cfg.WGSubnet6 != "" {
-		postUp = append(postUp,
-			fmt.Sprintf("ip6tables -A FORWARD -i %%i -o %s -s %s -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT", wanInterface, cfg.WGSubnet6),
-			fmt.Sprintf("ip6tables -A FORWARD -i %s -o %%i -d %s -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT", wanInterface, cfg.WGSubnet6),
-			fmt.Sprintf("ip6tables -t nat -A POSTROUTING -s %s -o %s -j MASQUERADE", cfg.WGSubnet6, wanInterface))
-		postDown = append(postDown,
-			fmt.Sprintf("ip6tables -D FORWARD -i %%i -o %s -s %s -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT", wanInterface, cfg.WGSubnet6),
-			fmt.Sprintf("ip6tables -D FORWARD -i %s -o %%i -d %s -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT", wanInterface, cfg.WGSubnet6),
-			fmt.Sprintf("ip6tables -t nat -D POSTROUTING -s %s -o %s -j MASQUERADE", cfg.WGSubnet6, wanInterface))
+		blocked := alwaysBlocked6
+		if !cfg.AllowPrivateNetworks {
+			blocked = append(slices.Clone(blocked), privateNets6...)
+		}
+		up, down := familyRules("ip6tables", "ipv6-icmp", cfg.WGSubnet6, wanInterface, blocked)
+		postUp, postDown = append(postUp, up...), append(postDown, down...)
 	}
 	return postUp, postDown
+}
+
+func familyRules(bin, icmp, subnet, wan string, blocked []string) (up, down []string) {
+	rules := []fwRule{
+		{chain: "FORWARD", args: fmt.Sprintf("-i %%i -o %s -s %s -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT", wan, subnet)},
+		{chain: "FORWARD", args: fmt.Sprintf("-i %s -o %%i -d %s -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT", wan, subnet)},
+		// Anything else from peers: other peers, other interfaces.
+		{chain: "FORWARD", args: "-i %i -j DROP"},
+	}
+	for _, dst := range blocked {
+		rules = append(rules, fwRule{chain: "FORWARD", args: fmt.Sprintf("-i %%i -d %s -j DROP", dst), insert: true})
+	}
+	rules = append(rules,
+		fwRule{table: "nat", chain: "POSTROUTING", args: fmt.Sprintf("-s %s -o %s -j MASQUERADE", subnet, wan)},
+		// Inserted in this order so ICMP ends up above the DROP.
+		fwRule{chain: "INPUT", args: "-i %i -j DROP", insert: true},
+		fwRule{chain: "INPUT", args: fmt.Sprintf("-i %%i -p %s -j ACCEPT", icmp), insert: true},
+	)
+	for i, r := range rules {
+		table := ""
+		if r.table != "" {
+			table = " -t " + r.table
+		}
+		op := "-A"
+		if r.insert {
+			op = "-I"
+		}
+		up = append(up, fmt.Sprintf("%s%s %s %s %s", bin, table, op, r.chain, r.args))
+		last := rules[len(rules)-1-i]
+		lastTable := ""
+		if last.table != "" {
+			lastTable = " -t " + last.table
+		}
+		down = append(down, fmt.Sprintf("%s%s -D %s %s", bin, lastTable, last.chain, last.args))
+	}
+	return up, down
 }
 
 func defaultConfigPath(iface string) string {

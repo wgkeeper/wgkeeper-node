@@ -17,9 +17,12 @@ wireguard:
   # Peers are always persisted to a bbolt file, created on first start.
   # Default: /var/lib/wgkeeper/peers.db (mounted as ./data in the compose files).
   # peer_store_file: "/var/lib/wgkeeper/peers.db"
-  # Optional: outbound interface for NAT. Detected from the default route when unset.
   # routing:
+  #   # Optional: outbound interface for NAT. Detected from the default route when unset.
   #   wan_interface: "eth0"
+  #   # Let peers reach private networks (10/8, 172.16/12, 192.168/16, 100.64/10,
+  #   # fc00::/7) through the node, e.g. an office LAN. Off: internet only.
+  #   allow_private_networks: false
 # Optional: Prometheus /metrics endpoint. Off by default.
 #
 # IMPORTANT: in Docker do NOT publish this port on the host. Keep the

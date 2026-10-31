@@ -41,7 +41,8 @@ skills-lock.json
 # local config
 /config.yaml
 
-# runtime WG configs
+# runtime WG configs (server private key) and the peer store (preshared keys)
 /wireguard/
+/data/
 
 .cache

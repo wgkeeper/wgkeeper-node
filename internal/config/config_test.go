@@ -324,6 +324,30 @@ wireguard:
 	}
 }
 
+func TestLoadConfigAllowPrivateNetworks(t *testing.T) {
+	path := writeConfigFile(t, `
+server:
+  port: "51821"
+auth:
+  api_key: "test-api-key-secure-key-longer!!"
+wireguard:
+  interface: "wg0"
+  subnet: "10.0.0.0/24"
+  listen_port: 51820
+  routing:
+    allow_private_networks: true
+`)
+	t.Setenv("NODE_CONFIG", path)
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf(msgExpectedNoError, err)
+	}
+	if !cfg.AllowPrivateNetworks {
+		t.Fatal("expected AllowPrivateNetworks=true")
+	}
+}
+
 func TestLoadConfigPeerStoreFileDefault(t *testing.T) {
 	path := writeSubnetConfig(t, testWGSubnet4, "")
 	t.Setenv("NODE_CONFIG", path)

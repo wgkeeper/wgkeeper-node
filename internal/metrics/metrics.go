@@ -98,7 +98,7 @@ func New() *Metrics {
 		}, []string{"op"}),
 		PersistRollback: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "wgkeeper_persist_rollback_total",
-			Help: "Persist rollbacks triggered by configureDevice failure during create/rotate.",
+			Help: "Peer store writes undone after a failed device change, by op (create, rotate, delete, expire).",
 		}, []string{"op"}),
 		PersistRollbackFailed: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "wgkeeper_persist_rollback_failed_total",

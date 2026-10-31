@@ -7,10 +7,15 @@
 .idea
 .cache
 
+# Runtime secrets from a local compose run: server private key, peer store
+/wireguard
+/data
+
 # CI / linting
 .golangci.yml
 
-# Docs & license
+# Docs, examples & license
+/examples
 *.md
 LICENSE
 
