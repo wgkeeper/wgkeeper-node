@@ -21,7 +21,6 @@ LICENSE
 
 # Config files (not needed in build)
 config*.yaml
-Caddyfile
 
 # Secrets
 .env

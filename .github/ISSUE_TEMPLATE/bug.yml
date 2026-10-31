@@ -20,8 +20,8 @@ body:
     attributes:
       label: Deployment
       options:
-        - Docker Compose (local)
-        - Docker Compose with Caddy (prod-secure)
+        - Docker Compose
+        - Docker Compose behind a reverse proxy
         - Other container setup
         - Bare metal
     validations:

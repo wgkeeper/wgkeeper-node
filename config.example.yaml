@@ -2,7 +2,7 @@
 # Unknown keys are errors.
 server:
   # Plain HTTP, default 51821. For HTTPS and client IP filtering put a reverse
-  # proxy in front (see docker-compose.prod-secure.yml and Caddyfile).
+  # proxy in front (see README, Deployment, and examples/caddy, examples/nginx).
   port: 51821
 auth:
   # At least 32 characters. Generate with: openssl rand -hex 32

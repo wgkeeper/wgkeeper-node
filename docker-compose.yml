@@ -19,8 +19,10 @@ services:
     ports:
       - "51820:51820/udp"
       # The API is plain HTTP, so it is published on this host's loopback only.
-      # To reach it from other machines, use docker-compose.prod-secure.yml
-      # (Caddy with HTTPS) instead of publishing it on all interfaces.
+      # To reach it from other machines, put a reverse proxy with HTTPS in
+      # front: on the host, proxy to 127.0.0.1:51821; in Docker, to
+      # wireguard:51821 (see examples/caddy and examples/nginx). Never publish
+      # it on all interfaces.
       - "127.0.0.1:51821:51821"
       # Do NOT publish the metrics port (e.g. 9090) on the host.
       # Keep /metrics inside the Docker network — let Prometheus scrape

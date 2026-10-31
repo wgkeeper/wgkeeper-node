@@ -13,7 +13,8 @@ api.example.com {
 	# @blocked not remote_ip 203.0.113.7
 	# abort @blocked
 
-	# The node's API over the Docker network. Port must match server.port in
-	# config.yaml. Caddy sets X-Forwarded-For, which the node logs.
+	# The node's API over the Docker network (Caddy installed on the host:
+	# 127.0.0.1:51821). Port must match server.port in config.yaml. Caddy sets
+	# X-Forwarded-For, which the node logs.
 	reverse_proxy wireguard:51821
 }

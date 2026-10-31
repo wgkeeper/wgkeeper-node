@@ -13,7 +13,7 @@ The node is now a plain HTTP API with API key auth. HTTPS, client IP filtering a
 
 ### Removed
 
-- **Breaking:** `server.tls_cert` and `server.tls_key`. Terminate TLS in a reverse proxy; `docker-compose.prod-secure.yml` and the `Caddyfile` do this with automatic certificates.
+- **Breaking:** `server.tls_cert` and `server.tls_key`. Terminate TLS in a reverse proxy; `examples/caddy` and `examples/nginx` show how.
 - **Breaking:** `server.allowed_ips` and `server.trusted_proxies`. Filter clients in the reverse proxy (for example Caddy's `remote_ip` matcher) or in the firewall.
 - **Breaking:** the built-in per-IP rate limit for the API. Use the reverse proxy if you need one. The `/metrics` endpoint keeps its own limit.
 - **Breaking:** per-peer metrics (`metrics.per_peer`, `metrics.per_peer_max` and the `wgkeeper_peer_rx_bytes_total`, `wgkeeper_peer_tx_bytes_total`, `wgkeeper_peer_last_handshake_seconds`, `wgkeeper_peers_capped` series). A series per peer grows with the peer count and flaps as peers enter and leave the top-N cap. Use `GET /peers` for per-peer traffic and handshakes. The Grafana dashboard drops its per-peer panels.
@@ -32,7 +32,7 @@ The node refuses to start if the config still contains a removed key (`server.tl
 - Invalid `addressFamilies` (unknown or repeated values) return `400 invalid_address_family` instead of `500`.
 - **Breaking:** peers are isolated. The generated `wg0.conf` now drops peer traffic to other peers, to interfaces other than the WAN one, to the node itself (API, metrics, host services; ping still works), to cloud metadata addresses, and to private networks. Before, any peer could reach the node's API and metrics port directly, cloud metadata at `169.254.169.254`, the Docker host and other containers. Set `wireguard.routing.allow_private_networks: true` if peers need private networks such as an office LAN.
 - **Breaking:** the compose files no longer grant `SYS_MODULE` and add `no-new-privileges`. On kernels older than 5.6, run `modprobe wireguard` on the host.
-- The node logs `X-Forwarded-For` as `forwarded_for` next to the TCP peer address, so the client address is visible behind any proxy without proxy trust settings. README documents what any reverse proxy must do, with an nginx example in `examples/nginx/nginx.conf`; Caddy in `docker-compose.prod-secure.yml` is just the ready-made option.
+- The node logs `X-Forwarded-For` as `forwarded_for` next to the TCP peer address, so the client address is visible behind any proxy without proxy trust settings. README documents what any reverse proxy must do, with nginx and Caddy examples.
 - Example configs moved from `docs/` to `examples/`: `nginx/nginx.conf`, `prometheus/prometheus.yml` (now uses `authorization.credentials_file`) and `grafana/dashboard.json`. New `examples/prometheus/alerts.yml` with alerting rules for a down node, a failed peer store rollback, a full subnet and error bursts.
 - Compose health checks use `/readyz`, which also checks the WireGuard interface.
 - The entrypoint shows `wg-quick` output, so a failed start logs its cause.
@@ -41,7 +41,7 @@ The node refuses to start if the config still contains a removed key (`server.tl
 - `wireguard.routing.wan_interface` is optional: the interface of the default route is used when it is unset.
 - `/etc/wireguard/<interface>.conf` is rewritten from `config.yaml` on every start instead of only on the first one, so changed subnets, listen port or WAN interface take effect. The server private key is kept from the existing file; the node refuses to start if that file has no valid `PrivateKey` rather than generating a new one. Manual edits to the file are overwritten.
 - `DEBUG` only switches logs to debug level. Errors behind a `4xx`/`5xx` response are always logged with the request ID, method, path and client address.
-- `docker-compose.local.yml`: the API is published on `127.0.0.1:51821` only, and the health check uses HTTP.
+- **Breaking:** the node no longer ships a proxy. `docker-compose.local.yml` is now `docker-compose.yml` (run `docker compose up -d`); it publishes the API on `127.0.0.1:51821` only, and the health check uses HTTP. `docker-compose.prod-secure.yml` and the `Caddyfile` moved to `examples/caddy/`, next to an nginx example with its own Compose file in `examples/nginx/`. For Caddy, run `docker compose -f docker-compose.yml -f examples/caddy/compose.yml up -d`, and move your edits from the old `Caddyfile` to `examples/caddy/Caddyfile`. Caddy's certificate volumes keep their names.
 - `config.example.yaml` no longer contains an `api_key` that the node rejects as too short.
 - Built with Go 1.27; dependencies updated.
 - Runtime image is based on Alpine 3.24 and no longer installs `ca-certificates` (the node makes no outbound TLS connections).

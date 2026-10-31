@@ -9,7 +9,7 @@ Examples of what we consider a vulnerability:
 - leaking private keys, preshared keys, the API key or the metrics token (in responses, logs or metrics);
 - injecting commands or rules through config values or API input (for example into iptables `PostUp`/`PostDown`);
 - crashing or exhausting the node with crafted requests despite the body limit;
-- a shipped deployment file (`docker-compose.*.yml`, `Caddyfile`) that exposes the plain HTTP API or the metrics endpoint beyond what it documents;
+- a shipped deployment file or example (`docker-compose.yml`, `examples/caddy`, `examples/nginx`) that exposes the plain HTTP API or the metrics endpoint beyond what it documents;
 - a vulnerable dependency or base image that is reachable in the shipped binary or container.
 
 ## Reporting a vulnerability

@@ -1,0 +1,31 @@
+# nginx in front of the node: HTTPS with a certificate you get on the host.
+#
+# Adds an nginx service on top of the main Compose file. Run from the repository
+# root; paths below are relative to it (the directory of the first -f file):
+#
+#   docker compose -f docker-compose.yml -f examples/nginx/compose.yml up -d
+#
+# nginx doesn't get certificates by itself. Get one on the host first, for
+# example with certbot (port 80 is left free for it):
+#
+#   certbot certonly --standalone -d api.example.com \
+#     --deploy-hook "docker compose -f $PWD/docker-compose.yml -f $PWD/examples/nginx/compose.yml exec nginx nginx -s reload"
+#
+# Edit server_name and the certificate paths in examples/nginx/nginx.conf.
+# Restrict 443 to your orchestrator in the host firewall as well. The node's own
+# API port stays on 127.0.0.1 only; nginx reaches it over the Docker network at
+# wireguard:51821.
+services:
+  nginx:
+    image: nginx:stable-alpine
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "443:443"
+    depends_on:
+      wireguard:
+        condition: service_healthy
+    volumes:
+      - ./examples/nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro

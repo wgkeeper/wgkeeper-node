@@ -23,7 +23,7 @@ WGKeeper Node runs one WireGuard interface on a Linux host and exposes an HTTP A
 - IPv4, IPv6 or dual-stack, with NAT rules set up for you.
 - Peers are stored in a local bbolt file and restored on the interface after every restart.
 - Peers get internet access only: they can't reach each other, the node itself, cloud metadata or private networks unless you allow it.
-- A small HTTP API with API key auth. HTTPS, IP filtering and rate limits are left to the reverse proxy you already use (Caddy, nginx, anything else); a ready Caddy setup and an nginx example are included.
+- A small HTTP API with API key auth. HTTPS, IP filtering and rate limits are left to the reverse proxy you already use (Caddy, nginx, anything else); Caddy and nginx examples are included.
 - Optional Prometheus metrics on a separate port with its own token.
 
 Full documentation: [wgkeeper.github.io/docs/node](https://wgkeeper.github.io/docs/node/installation).
@@ -62,7 +62,7 @@ On every start the node writes `/etc/wireguard/<interface>.conf` (`./wireguard/<
 
 ## Quick start
 
-The fastest way to try the node is the image from GHCR with the local Compose file. Run this on a Linux host with WireGuard support.
+The fastest way to try the node is the image from GHCR with the Compose file. Run this on a Linux host with WireGuard support.
 
 1. Get the Compose file and the example config:
 
@@ -76,7 +76,7 @@ The fastest way to try the node is the image from GHCR with the local Compose fi
 3. Start the node:
 
    ```bash
-   docker compose -f docker-compose.local.yml up -d
+   docker compose up -d
    curl http://localhost:51821/healthz
    ```
 
@@ -91,7 +91,7 @@ The fastest way to try the node is the image from GHCR with the local Compose fi
 
    The response has the server's public key and port, and the peer's keys and IP addresses: everything a client config needs. The peer's private key is returned only here and is not stored.
 
-WireGuard listens on `51820/udp`. The API is plain HTTP on `51821`, published on `127.0.0.1` only. To reach it from other machines, use the [production setup with Caddy](#docker-compose-with-caddy-production).
+WireGuard listens on `51820/udp`. The API is plain HTTP on `51821`, published on `127.0.0.1` only. To reach it from other machines, put a [reverse proxy](#behind-a-reverse-proxy) in front.
 
 ## Requirements
 
@@ -149,63 +149,42 @@ Metrics settings are described in [Metrics](#metrics).
 
 ## Deployment
 
-### Docker Compose (local)
+### Docker Compose
 
-[`docker-compose.local.yml`](docker-compose.local.yml) runs `ghcr.io/wgkeeper/node` with `NET_ADMIN` and `no-new-privileges`, mounts `config.yaml`, `./wireguard` and `./data`, publishes `51820/udp` on all interfaces and the API on `127.0.0.1:51821` only, and sets the IPv4/IPv6 forwarding sysctls on an IPv6-capable network. Use the `edge` tag for the latest build from `main`.
+[`docker-compose.yml`](docker-compose.yml) runs `ghcr.io/wgkeeper/node` with `NET_ADMIN` and `no-new-privileges`, mounts `config.yaml`, `./wireguard` and `./data`, publishes `51820/udp` on all interfaces and the API on `127.0.0.1:51821` only, and sets the IPv4/IPv6 forwarding sysctls on an IPv6-capable network. Use the `edge` tag for the latest build from `main`.
 
 ```bash
 cp config.example.yaml config.yaml
-docker compose -f docker-compose.local.yml up -d
+docker compose up -d
 ```
 
-This setup is for trying the node on the same machine. For access from another host, use the Caddy setup below.
+The API is reachable from this host only. For access from another host, put a reverse proxy in front.
 
-### Docker Compose with Caddy (production)
+### Behind a reverse proxy
 
-[`docker-compose.prod-secure.yml`](docker-compose.prod-secure.yml) puts [Caddy](https://caddyserver.com) in front of the node. Caddy reaches the API over the Docker network at `wireguard:51821` and is the only HTTP(S) entry point. The API port is never published.
+The node only speaks plain HTTP and has no TLS, IP filtering or rate limiting of its own. Use whatever proxy you already run (nginx, Caddy, Traefik, HAProxy, a cloud load balancer), on the host or in Docker. It must:
 
-| Published port | Served by |
-|----------------|-----------|
-| `51820/udp` | WireGuard |
-| `80`, `443` | Caddy: HTTPS with an automatic Let's Encrypt certificate, proxied to the API |
+1. Terminate TLS. Send HSTS from the proxy.
+2. Forward to the node over loopback or a private network: `127.0.0.1:51821` from the host, `wireguard:51821` from a container in the same Compose project. Never publish the node's port on a public interface.
+3. Filter clients by IP and rate-limit, if you need either. Allowing only your orchestrator is the simplest protection.
+4. Set `X-Forwarded-For` to the client address, overwriting any value the client sent. The node logs it as `forwarded_for` next to the TCP peer address; nothing in the node trusts it for access.
+5. Allow at least 30s per request and bodies up to 256 KB.
+6. Not route `/metrics` or the metrics port through the public site.
+
+If you change `server.port`, change the proxy target and the port in the Compose health check to match.
+
+Two examples to start from. Each has a proxy config and a Compose file that adds the proxy next to the node; both configs point at `wireguard:51821` and say what to change when the proxy runs on the host instead.
+
+- [`examples/caddy/`](examples/caddy): Caddy with an automatic Let's Encrypt certificate. Edit the domain in the `Caddyfile`.
+- [`examples/nginx/`](examples/nginx): nginx with an optional IP allowlist and rate limit. nginx doesn't get certificates itself; `compose.yml` shows how to get one with certbot on the host. Edit `server_name` and the certificate paths in `nginx.conf`.
+
+Run from the repository root, with `caddy` or `nginx`:
 
 ```bash
-docker compose -f docker-compose.prod-secure.yml up -d
+docker compose -f docker-compose.yml -f examples/caddy/compose.yml up -d
 ```
 
-Edit the [`Caddyfile`](Caddyfile) before starting:
-
-```Caddyfile
-api.example.com {
-    encode gzip zstd
-
-    # Optional: allow only your orchestrator
-    # @blocked not remote_ip 203.0.113.7
-    # abort @blocked
-
-    reverse_proxy wireguard:51821
-}
-```
-
-For production:
-
-- Use a long random `auth.api_key`.
-- Replace `api.example.com` with a domain pointing at the node. Caddy gets the certificate once ports 80 and 443 are reachable.
-- Allow ports `80` and `443` in the firewall only from your orchestrator, or uncomment the `remote_ip` block above. Caddy sees the real client address, so no extra node settings are needed.
-- If you change `server.port`, change `reverse_proxy wireguard:<port>` and the port in the healthcheck to match.
-
-### Using another reverse proxy
-
-Nothing in the node depends on Caddy. nginx, Traefik, HAProxy or a cloud load balancer work the same way, as long as the proxy:
-
-1. Terminates TLS. The node only speaks HTTP. Send HSTS from the proxy.
-2. Forwards to `<node>:<server.port>` over loopback or a private network. Never publish the node's port on a public interface.
-3. Filters clients by IP and rate-limits, if you need either. The node does neither.
-4. Sets `X-Forwarded-For` to the client address, overwriting any value the client sent. The node logs it as `forwarded_for` next to the TCP peer address; nothing in the node trusts it for access.
-5. Allows at least 30s per request and bodies up to 256 KB.
-6. Doesn't route `/metrics` or the metrics port through the public site.
-
-[`examples/nginx/nginx.conf`](examples/nginx/nginx.conf) is a complete nginx example.
+To have plain `docker compose` commands include the proxy, put `COMPOSE_FILE=docker-compose.yml:examples/caddy/compose.yml` in `.env`.
 
 ### From source
 
@@ -334,8 +313,7 @@ Per-peer traffic and handshakes are not exported as metrics: a series per peer g
 
 The metrics endpoint listens on all interfaces. Peer counts, the version and capacity tell an attacker a lot, so don't expose it to the internet even with the token:
 
-- **Docker:** don't add `9090:9090` to `ports:`. Run Prometheus in the same Compose project and scrape `wireguard:9090` over the Docker network. `docker-compose.local.yml` has a commented-out Prometheus service for this.
-- **Docker with Caddy:** same as above. If Prometheus runs elsewhere, add a separate Caddy site (for example `metrics.example.com`) with client certificate (mTLS) auth that proxies to `127.0.0.1:9090`.
+- **Docker:** don't add `9090:9090` to `ports:`. Run Prometheus in the same Compose project and scrape `wireguard:9090` over the Docker network. `docker-compose.yml` has a commented-out Prometheus service for this. If Prometheus runs elsewhere, add a separate site in your reverse proxy (for example `metrics.example.com`) with client certificate (mTLS) auth that proxies to the metrics port.
 - **Bare metal:** allow `9090/tcp` in the firewall only from `127.0.0.1` or your Prometheus host.
 
 ## Security
@@ -344,7 +322,7 @@ The metrics endpoint listens on all interfaces. Peer counts, the version and cap
 |-----------|---------|
 | API key | Required on every endpoint except `/healthz` and `/readyz` (`X-API-Key`), compared in constant time, at least 32 characters |
 | Error details | Logged with the request ID, never returned to the client |
-| HTTPS, IP filtering, rate limiting | In the reverse proxy; see [Using another reverse proxy](#using-another-reverse-proxy). Client addresses, including `X-Forwarded-For`, are only logged, never used for access decisions |
+| HTTPS, IP filtering, rate limiting | In the reverse proxy; see [Behind a reverse proxy](#behind-a-reverse-proxy). Client addresses, including `X-Forwarded-For`, are only logged, never used for access decisions |
 | Peer isolation | Peers reach the internet only; see [Peer isolation](#peer-isolation) |
 | Container | `NET_ADMIN` only, `no-new-privileges` |
 | Body limit | 256 KB; larger requests get `413` |

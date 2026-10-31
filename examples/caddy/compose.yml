@@ -1,0 +1,30 @@
+# Caddy in front of the node: HTTPS with an automatic Let's Encrypt certificate.
+#
+# Adds a caddy service on top of the main Compose file. Run from the repository
+# root; paths below are relative to it (the directory of the first -f file):
+#
+#   docker compose -f docker-compose.yml -f examples/caddy/compose.yml up -d
+#
+# Edit examples/caddy/Caddyfile first. Restrict 80/443 to your orchestrator in
+# the host firewall as well. The node's own API port stays on 127.0.0.1 only;
+# Caddy reaches it over the Docker network at wireguard:51821.
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      wireguard:
+        condition: service_healthy
+    volumes:
+      - ./examples/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:
