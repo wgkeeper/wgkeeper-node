@@ -18,7 +18,7 @@ Pass options after `bash -s --`:
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--version X.Y.Z` | latest stable release | Release to install, for example `2.0.0-rc.1` |
+| `--version X.Y.Z` | latest stable release | Release to install, for example `2.0.0` |
 | `--domain NAME` | | Add Caddy with an automatic Let's Encrypt certificate for this domain. Point the domain at the server first; ports 80 and 443 must be reachable |
 | `--subnet CIDR` | `10.0.0.0/24` | IPv4 subnet for peers, used only when `config.yaml` doesn't exist yet |
 | `--dir PATH` | `/opt/wgkeeper` | Install directory |

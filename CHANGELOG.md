@@ -7,9 +7,11 @@ Each release's notes on GitHub are taken from its section here.
 
 ## [Unreleased]
 
-Planned as 2.0.0: a major release with breaking changes to the config, the deployment files, the API and the logs. Read the **Breaking** entries before upgrading from 1.x.
+## [2.0.0] - 2026-10-31
 
-The node is now a plain HTTP API with API key auth. HTTPS, client IP filtering and rate limiting move to the reverse proxy in front of it. Peers are always persisted, and the NAT interface is detected automatically.
+A major release with breaking changes to the config, the deployment files, the API and the logs. Read the **Breaking** entries before upgrading from 1.x.
+
+The node is now a plain HTTP API with API key auth. HTTPS, client IP filtering and rate limiting move to the reverse proxy in front of it. Peers are always persisted and isolated from each other, the NAT interface is detected automatically, and an install script sets up or updates a node with one command.
 
 ### Added
 
@@ -39,7 +41,7 @@ The node refuses to start if the config still contains a removed key (`server.tl
 - **Breaking:** the compose files no longer grant `SYS_MODULE` and add `no-new-privileges`. On kernels older than 5.6, run `modprobe wireguard` on the host.
 - The node logs `X-Forwarded-For` as `forwarded_for` next to the TCP peer address, so the client address is visible behind any proxy without proxy trust settings. `docs/deployment.md` documents what any reverse proxy must do, with nginx and Caddy examples.
 - Example configs moved from `docs/` to `examples/`: `nginx/nginx.conf`, `prometheus/prometheus.yml` (now uses `authorization.credentials_file`) and `grafana/dashboard.json`. New `examples/prometheus/alerts.yml` with alerting rules for a down node, a failed peer store rollback, a full subnet and error bursts.
-- The README is short; the reference (configuration, deployment, API, peer store, metrics, security) moved to [`docs/`](docs/README.md).
+- The README is short; the reference (configuration, deployment, API, peer store, metrics, security) moved to [`docs/`](https://github.com/wgkeeper/wgkeeper-node/blob/v2.0.0/docs/README.md).
 - `docker-compose.yml` no longer fixes the IPv4 subnet of its network (`172.18.0.0/16`); Docker picks a free one, so the node starts on hosts where another Compose project already uses that range.
 - The compose files rotate container logs (Docker's `local` driver, three files of 10 MB) instead of keeping them forever. A node with a public HTTPS address is scanned constantly, and unrotated logs eventually fill the disk.
 - Requests to paths the API doesn't have are logged at INFO instead of WARN, so internet scanners don't drown real warnings. Other `4xx` responses, including `401`, stay at WARN.
@@ -86,10 +88,11 @@ Measured with 50,000 peers:
 - The request body of `/peers` is read only after authentication, and both servers accept at most 16 KB of headers.
 - A handler panic is logged through slog without request headers; gin's default recovery printed `X-API-Key` in debug mode.
 - `metrics.token` is compared to the trimmed `auth.api_key`, so whitespace can't make the two secrets look different.
-- Release images ship with a signed build provenance attestation and an SBOM (see [SECURITY.md](SECURITY.md#verifying-images)).
+- Release images ship with a signed build provenance attestation and an SBOM (see [SECURITY.md](https://github.com/wgkeeper/wgkeeper-node/blob/v2.0.0/SECURITY.md#verifying-images)).
 
 ## Earlier releases
 
 Notes for 1.3.1 and earlier are on [GitHub Releases](https://github.com/wgkeeper/wgkeeper-node/releases).
 
-[Unreleased]: https://github.com/wgkeeper/wgkeeper-node/compare/v1.3.1...HEAD
+[Unreleased]: https://github.com/wgkeeper/wgkeeper-node/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/wgkeeper/wgkeeper-node/compare/v1.3.1...v2.0.0
