@@ -212,7 +212,8 @@ jobs:
             awk -v head="## [$name]" '
               index($0, head) == 1 { found = 1; next }
               found && /^## / { exit }
-              found { print }
+              found && !started && $0 == "" { next }
+              found { started = 1; print }
             ' CHANGELOG.md
           }
           section "$version" > "$RUNNER_TEMP/notes.md"
