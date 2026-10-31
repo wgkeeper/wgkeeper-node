@@ -2,6 +2,13 @@ services:
   wireguard:
     image: ghcr.io/wgkeeper/node
     restart: always
+    # Rotated logs: an internet-facing node gets scanned all the time, and
+    # Docker's default json-file driver keeps every line forever.
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
     # Graceful shutdown waits for in-flight API requests and the expiry cleanup.
     stop_grace_period: 30s
     # NET_ADMIN is all the node needs. WireGuard is in the kernel since 5.6;

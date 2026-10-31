@@ -33,6 +33,25 @@ func forwardedFor(r *http.Request) string {
 	return v
 }
 
+// routeMissKey marks a request that matched no route, so the request log can
+// tell internet scanners probing random paths from errors of real API calls.
+const routeMissKey = "wgkeeper.route_miss"
+
+// requestLogLevel picks the level of the request log line: errors for 5xx,
+// warnings for 4xx except a 404 for a path the API doesn't have, which is
+// scanner noise and logged at info.
+func requestLogLevel(status int, keys map[any]any) slog.Level {
+	switch {
+	case status >= http.StatusInternalServerError:
+		return slog.LevelError
+	case status == http.StatusNotFound && keys[routeMissKey] == true:
+		return slog.LevelInfo
+	case status >= http.StatusBadRequest:
+		return slog.LevelWarn
+	}
+	return slog.LevelInfo
+}
+
 // NewRouter builds the API router. m is optional — pass nil when metrics are
 // disabled; handlers nil-check before recording.
 func NewRouter(apiKey string, wgService *wireguard.WireGuardService, m *metrics.Metrics) *gin.Engine {
@@ -50,12 +69,7 @@ func NewRouter(apiKey string, wgService *wireguard.WireGuardService, m *metrics.
 		if param.Path == "/healthz" || param.Path == "/readyz" {
 			return ""
 		}
-		level := slog.LevelInfo
-		if param.StatusCode >= 500 {
-			level = slog.LevelError
-		} else if param.StatusCode >= 400 {
-			level = slog.LevelWarn
-		}
+		level := requestLogLevel(param.StatusCode, param.Keys)
 		requestID := GetRequestIDFromContext(param.Request.Context())
 		slog.Log(param.Request.Context(), level, "http request",
 			"method", param.Method,
@@ -68,6 +82,8 @@ func NewRouter(apiKey string, wgService *wireguard.WireGuardService, m *metrics.
 		)
 		return ""
 	}), recoveryMiddleware())
+	// Gin still writes its default 404 body after this handler.
+	router.NoRoute(func(c *gin.Context) { c.Set(routeMissKey, true) })
 	registerRoutes(router, apiKey, wgService, m)
 	return router
 }

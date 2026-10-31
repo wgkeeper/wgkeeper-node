@@ -87,3 +87,51 @@ func TestRecoveryMiddlewareHidesHeaders(t *testing.T) {
 		t.Fatal("panic should be logged")
 	}
 }
+
+func TestRequestLogLevel(t *testing.T) {
+	svc := wireguard.NewTestService()
+	router := NewRouter(routerTestAPIKey, svc, nil)
+	cases := map[string]struct {
+		path   string
+		apiKey string
+		status int
+		level  string
+	}{
+		"unknown_path_is_info":  {path: "/.env", status: http.StatusNotFound, level: "level=INFO"},
+		"missing_api_key_warns": {path: "/stats", status: http.StatusUnauthorized, level: "level=WARN"},
+		"missing_peer_warns": {
+			path:   "/peers/8f0c6a52-3b7e-4d4f-9a61-2f5c1d7e9b10",
+			apiKey: routerTestAPIKey,
+			status: http.StatusNotFound,
+			level:  "level=WARN",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			var logs strings.Builder
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+			t.Cleanup(func() { slog.SetDefault(prev) })
+
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+			if tc.apiKey != "" {
+				req.Header.Set("X-API-Key", tc.apiKey)
+			}
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+
+			if rec.Code != tc.status {
+				t.Fatalf("status: got %d, want %d", rec.Code, tc.status)
+			}
+			var line string
+			for l := range strings.Lines(logs.String()) {
+				if strings.Contains(l, `msg="http request"`) {
+					line = l
+				}
+			}
+			if !strings.Contains(line, tc.level) {
+				t.Fatalf("request log: got %q, want %s", line, tc.level)
+			}
+		})
+	}
+}

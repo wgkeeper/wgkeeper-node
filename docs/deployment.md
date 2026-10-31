@@ -27,6 +27,8 @@ Pass options after `bash -s --`:
 curl -fsSL https://raw.githubusercontent.com/wgkeeper/wgkeeper-node/main/scripts/install.sh | sudo bash -s -- --domain node1.example.com
 ```
 
+Scanners find a new HTTPS domain within minutes of its certificate being issued. If your orchestrator has a fixed address, let only it through: uncomment the `remote_ip` block in `/opt/wgkeeper/examples/caddy/Caddyfile`, set the address, and run `docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile` in `/opt/wgkeeper`.
+
 The script never overwrites `config.yaml`, `./wireguard` (the server key) or `./data` (the peers). It replaces `docker-compose.yml` with the one from the release, so put your own Compose changes in `docker-compose.override.yml` next to it; the script includes that file when it exists.
 
 ### Updating
@@ -41,7 +43,7 @@ It keeps the config, the server key and the peers, pulls the new image and resta
 
 ## Docker Compose
 
-[`docker-compose.yml`](../docker-compose.yml) runs `ghcr.io/wgkeeper/node` with `NET_ADMIN` and `no-new-privileges`, mounts `config.yaml`, `./wireguard` and `./data`, publishes `51820/udp` on all interfaces and the API on `127.0.0.1:51821` only, and sets the IPv4/IPv6 forwarding sysctls on an IPv6-capable network. Use the `edge` tag for the latest build from `main`.
+[`docker-compose.yml`](../docker-compose.yml) runs `ghcr.io/wgkeeper/node` with `NET_ADMIN` and `no-new-privileges`, mounts `config.yaml`, `./wireguard` and `./data`, publishes `51820/udp` on all interfaces and the API on `127.0.0.1:51821` only, sets the IPv4/IPv6 forwarding sysctls on an IPv6-capable network, and rotates the container logs (three files of 10 MB). Use the `edge` tag for the latest build from `main`.
 
 ```bash
 cp config.example.yaml config.yaml

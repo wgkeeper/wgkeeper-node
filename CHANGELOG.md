@@ -41,6 +41,8 @@ The node refuses to start if the config still contains a removed key (`server.tl
 - Example configs moved from `docs/` to `examples/`: `nginx/nginx.conf`, `prometheus/prometheus.yml` (now uses `authorization.credentials_file`) and `grafana/dashboard.json`. New `examples/prometheus/alerts.yml` with alerting rules for a down node, a failed peer store rollback, a full subnet and error bursts.
 - The README is short; the reference (configuration, deployment, API, peer store, metrics, security) moved to [`docs/`](docs/README.md).
 - `docker-compose.yml` no longer fixes the IPv4 subnet of its network (`172.18.0.0/16`); Docker picks a free one, so the node starts on hosts where another Compose project already uses that range.
+- The compose files rotate container logs (Docker's `local` driver, three files of 10 MB) instead of keeping them forever. A node with a public HTTPS address is scanned constantly, and unrotated logs eventually fill the disk.
+- Requests to paths the API doesn't have are logged at INFO instead of WARN, so internet scanners don't drown real warnings. Other `4xx` responses, including `401`, stay at WARN.
 - Compose health checks use `/readyz`, which also checks the WireGuard interface.
 - The entrypoint shows `wg-quick` output, so a failed start logs its cause.
 - `./data/` (peer store) is ignored by git, and `./wireguard/` and `./data/` are kept out of the Docker build context.

@@ -12,6 +12,13 @@ services:
   caddy:
     image: caddy:2
     restart: unless-stopped
+    # Rotated logs: an internet-facing node gets scanned all the time, and
+    # Docker's default json-file driver keeps every line forever.
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
     security_opt:
       - no-new-privileges:true
     ports:
