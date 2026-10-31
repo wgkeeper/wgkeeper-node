@@ -227,7 +227,7 @@ func parseServerAndAuth(fc fileConfig) (portValue int, apiKey string, err error)
 // them would leave a node that the operator believes is behind TLS or an IP
 // allowlist serving plain, unfiltered HTTP.
 func rejectRemovedServerKeys(fc fileConfig) error {
-	const hint = "removed in 2.0.0; terminate TLS and filter clients in a reverse proxy such as Caddy or nginx (see README)"
+	const hint = "removed in 2.0.0; terminate TLS and filter clients in a reverse proxy such as Caddy or nginx (see docs/deployment.md)"
 	switch {
 	case strings.TrimSpace(fc.Server.TLSCert) != "" || strings.TrimSpace(fc.Server.TLSKey) != "":
 		return fmt.Errorf("server.tls_cert and server.tls_key were %s", hint)

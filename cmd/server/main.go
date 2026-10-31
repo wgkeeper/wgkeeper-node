@@ -214,7 +214,7 @@ func isFatalServerError(err error) bool {
 }
 
 // newHTTPServer serves the API over plain HTTP. TLS, client filtering and
-// rate limiting are the reverse proxy's job (see README, Deployment).
+// rate limiting are the reverse proxy's job (see docs/deployment.md).
 func newHTTPServer(cfg config.Config, addr string, wgService *wireguard.WireGuardService, m *metrics.Metrics) *http.Server {
 	return &http.Server{
 		Addr:              addr,

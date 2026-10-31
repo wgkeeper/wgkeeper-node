@@ -2,7 +2,7 @@
 #
 # In a Docker compose project where the node is the service named "wireguard",
 # Prometheus reaches it over the Docker network (http://wireguard:9090). The
-# metrics port is never published on the host. See README → Metrics.
+# metrics port is never published on the host. See docs/metrics.md.
 
 global:
   scrape_interval: 30s

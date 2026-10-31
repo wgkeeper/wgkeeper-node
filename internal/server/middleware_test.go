@@ -37,6 +37,9 @@ func TestAPIKeyMiddleware(t *testing.T) {
 		if rec.Code != http.StatusUnauthorized {
 			t.Errorf(middlewareTestStatus401Fmt, rec.Code)
 		}
+		if body := rec.Body.String(); body != `{"code":"unauthorized","error":"unauthorized"}` {
+			t.Errorf("body: got %s", body)
+		}
 	})
 
 	t.Run("correct_key_calls_next", func(t *testing.T) {

@@ -30,10 +30,12 @@ The node refuses to start if the config still contains a removed key (`server.tl
 - **Breaking:** `POST /peers` rejects unknown JSON fields and trailing data with `400 invalid_json`. A misspelled `expiresAt` used to create a permanent peer.
 - `server.port`, `wireguard.interface` and `wireguard.listen_port` default to `51821`, `wg0` and `51820`; the smallest config is `auth.api_key` plus a subnet. `wireguard.interface` must be a valid Linux interface name of up to 15 characters.
 - Invalid `addressFamilies` (unknown or repeated values) return `400 invalid_address_family` instead of `500`.
+- `401` responses have `"code": "unauthorized"`, like every other error.
 - **Breaking:** peers are isolated. The generated `wg0.conf` now drops peer traffic to other peers, to interfaces other than the WAN one, to the node itself (API, metrics, host services; ping still works), to cloud metadata addresses, and to private networks. Before, any peer could reach the node's API and metrics port directly, cloud metadata at `169.254.169.254`, the Docker host and other containers. Set `wireguard.routing.allow_private_networks: true` if peers need private networks such as an office LAN.
 - **Breaking:** the compose files no longer grant `SYS_MODULE` and add `no-new-privileges`. On kernels older than 5.6, run `modprobe wireguard` on the host.
-- The node logs `X-Forwarded-For` as `forwarded_for` next to the TCP peer address, so the client address is visible behind any proxy without proxy trust settings. README documents what any reverse proxy must do, with nginx and Caddy examples.
+- The node logs `X-Forwarded-For` as `forwarded_for` next to the TCP peer address, so the client address is visible behind any proxy without proxy trust settings. `docs/deployment.md` documents what any reverse proxy must do, with nginx and Caddy examples.
 - Example configs moved from `docs/` to `examples/`: `nginx/nginx.conf`, `prometheus/prometheus.yml` (now uses `authorization.credentials_file`) and `grafana/dashboard.json`. New `examples/prometheus/alerts.yml` with alerting rules for a down node, a failed peer store rollback, a full subnet and error bursts.
+- The README is short; the reference (configuration, deployment, API, peer store, metrics, security) moved to [`docs/`](docs/README.md).
 - Compose health checks use `/readyz`, which also checks the WireGuard interface.
 - The entrypoint shows `wg-quick` output, so a failed start logs its cause.
 - `./data/` (peer store) is ignored by git, and `./wireguard/` and `./data/` are kept out of the Docker build context.

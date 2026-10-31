@@ -50,7 +50,7 @@ go test -bench=. -benchmem -run='^$' ./internal/wireguard/ ./internal/server/
 2. Keep a pull request to one change, with tests for new behavior and bug fixes.
 3. Title it in [Conventional Commits](https://www.conventionalcommits.org/) style: `feat(metrics): add per-peer metrics`, `fix: IPv4 alloc leak`. The title becomes the squashed commit on `main`.
 4. If users will notice the change (API, config, metrics, image, behavior), add a line to `CHANGELOG.md` under `[Unreleased]`.
-5. Update `README.md` when you change the API, config keys or deployment.
+5. Update the docs in `docs/` when you change the API, config keys, metrics or deployment.
 
 ## Releases (maintainers)
 

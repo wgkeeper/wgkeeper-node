@@ -20,7 +20,7 @@ func apiKeyMiddleware(apiKey string) gin.HandlerFunc {
 		}
 
 		if !apiKeyMatches(c, apiKey) {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized", "code": "unauthorized"})
 			c.Abort()
 			return
 		}

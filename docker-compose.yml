@@ -26,7 +26,7 @@ services:
       - "127.0.0.1:51821:51821"
       # Do NOT publish the metrics port (e.g. 9090) on the host.
       # Keep /metrics inside the Docker network — let Prometheus scrape
-      # via the service name. See README → Metrics for an example.
+      # via the service name. See docs/metrics.md.
     sysctls:
       - net.ipv4.conf.all.src_valid_mark=1
       - net.ipv4.ip_forward=1
