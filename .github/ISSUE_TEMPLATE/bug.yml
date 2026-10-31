@@ -1,0 +1,61 @@
+name: Bug report
+description: The node, its API or the image did something wrong.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security problems go to [Report a vulnerability](https://github.com/wgkeeper/wgkeeper-node/security/advisories/new), not here.
+        Remove API keys, private and preshared keys, metrics tokens and public IPs from everything you paste.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Image tag or the version printed at startup.
+      placeholder: 1.3.1
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment
+      options:
+        - Docker Compose (local)
+        - Docker Compose with Caddy (prod-secure)
+        - Other container setup
+        - Bare metal
+    validations:
+      required: true
+  - type: input
+    id: host
+    attributes:
+      label: Host
+      description: OS, kernel and architecture (`uname -srm`).
+      placeholder: Ubuntu 24.04, Linux 6.8.0, x86_64
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The request or action, and the response, error or behavior you got.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Config (redacted)
+      description: The relevant parts of `config.yaml`.
+      render: yaml
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Node logs around the problem.
+      render: text
