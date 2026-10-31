@@ -2,6 +2,8 @@ package wireguard
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"runtime/debug"
 	"time"
@@ -55,16 +57,6 @@ func (s *WireGuardService) cleanupExpiredPeers() {
 	if err != nil {
 		slog.Error("cleanup: batch delete expired peers", "count", len(candidates), "error", err)
 	}
-	if len(deleted) == 0 {
-		return
-	}
-	deletedIDs := make([]string, len(deleted))
-	for i, d := range deleted {
-		deletedIDs[i] = d.peerID
-	}
-	if err := s.store.PersistDeleteBatch(deletedIDs...); err != nil {
-		slog.Error("cleanup: save peer store", "error", err, "peerIds", deletedIDs)
-	}
 	for _, d := range deleted {
 		slog.Info("audit.peer_expired",
 			"peerId", d.peerID,
@@ -81,10 +73,11 @@ type expiredPeerInfo struct {
 	allowedIPs []string
 }
 
-// doCleanupBatch re-checks each candidate under s.mu, removes all still-expired
-// peers from the device in one configureDevice call, and updates the store and
-// usedIPs cache. Returns the audit data for peers that were successfully
-// removed.
+// doCleanupBatch re-checks each candidate under s.mu and removes all
+// still-expired peers write-ahead, like DeletePeer: one bbolt transaction
+// deletes the records, then one configureDevice call removes the device peers;
+// if that call fails the records are restored. Returns the audit data for
+// peers that were removed.
 //
 // Re-checking under the lock prevents a race with a concurrent EnsurePeer that
 // extends a peer's expiry between the ForEach snapshot and this call.
@@ -107,24 +100,34 @@ func (s *WireGuardService) doCleanupBatch(candidates []string, now time.Time) ([
 		return nil, nil
 	}
 
-	// One kernel call for all removals.
+	ids := make([]string, len(toRemove))
 	peers := make([]wgtypes.PeerConfig, len(toRemove))
 	for i, rec := range toRemove {
+		ids[i] = rec.PeerID
 		peers[i] = wgtypes.PeerConfig{PublicKey: rec.PublicKey, Remove: true}
 	}
+	if err := s.store.PersistDeleteBatch(ids...); err != nil {
+		return nil, fmt.Errorf(errSavePeerStoreFmt, err)
+	}
 	if err := s.configureDevice(wgtypes.Config{Peers: peers}); err != nil {
+		var rbErr error
+		for _, rec := range toRemove {
+			rbErr = errors.Join(rbErr, s.store.PersistPut(rec))
+		}
+		if rbErr != nil {
+			slog.Error("rollback persist after cleanup failure",
+				"count", len(toRemove), "rollback_error", rbErr, "device_error", err)
+		}
+		s.notifyRollback(rollbackOpExpire, rbErr)
 		return nil, err
 	}
 
-	// Update store and IP cache after successful device operation.
 	deleted := make([]expiredPeerInfo, 0, len(toRemove))
 	for _, rec := range toRemove {
-		s.store.Delete(rec.PeerID)
+		s.forgetPeerLocked(rec)
 		ips := make([]string, len(rec.AllowedIPs))
 		for i, aip := range rec.AllowedIPs {
 			ips[i] = aip.String()
-			delete(s.usedIPs, aip.IP.String())
-			s.retractAllocHint(aip.IP)
 		}
 		deleted = append(deleted, expiredPeerInfo{
 			peerID:     rec.PeerID,

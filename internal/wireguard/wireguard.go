@@ -31,6 +31,10 @@ var (
 	ErrPeerNotFound             = errors.New("peer not found")
 	ErrNoAvailableIP            = errors.New("no available ip addresses")
 	ErrUnsupportedAddressFamily = errors.New("requested address family is not supported by this node")
+	// ErrPeerExpired is returned when rotating a peer whose expiry has passed
+	// without giving it a new one: the rotation would succeed and the cleanup
+	// loop would delete the peer moments later.
+	ErrPeerExpired = errors.New("peer has expired; pass a future expiresAt to renew it")
 )
 
 const (
@@ -68,7 +72,7 @@ type PeerInfo struct {
 // no calls.
 type RollbackObserver interface {
 	// OnPersistRollback fires when configureDevice failed and the bbolt write
-	// was rolled back successfully. op is "create" or "rotate".
+	// was rolled back successfully. op is "create", "rotate", "delete" or "expire".
 	OnPersistRollback(op string)
 	// OnPersistRollbackFailed fires when the rollback itself errored — bbolt
 	// holds a record that startup reconcile will install on the device next
@@ -79,6 +83,8 @@ type RollbackObserver interface {
 const (
 	rollbackOpCreate = "create"
 	rollbackOpRotate = "rotate"
+	rollbackOpDelete = "delete"
+	rollbackOpExpire = "expire"
 )
 
 type WireGuardService struct {
@@ -225,7 +231,7 @@ func NewWireGuardService(cfg config.Config) (*WireGuardService, error) {
 		devCache:    newDeviceCache(deviceCacheTTL),
 	}
 	if err := initPersistStore(svc); err != nil {
-		return nil, err
+		return nil, errors.Join(err, svc.store.Close())
 	}
 	svc.initUsedIPs()
 	return svc, nil
@@ -282,17 +288,18 @@ func initPersistStore(svc *WireGuardService) error {
 	if err := svc.store.OpenFile(svc.persistPath); err != nil {
 		return fmt.Errorf("load peer store: %w", err)
 	}
+	// Check the store against the config before touching the device: a
+	// mismatch is almost always a config change or typo, and the node never
+	// deletes peers to resolve it.
+	if err := svc.validateStoredPeers(); err != nil {
+		return err
+	}
 	if err := svc.reconcileStoreWithDevice(); err != nil {
 		return fmt.Errorf("reconcile peer store with device: %w", err)
 	}
 	// Remove expired peers synchronously so they are not visible on the device
 	// or in the store before the HTTP server starts accepting requests.
 	svc.cleanupExpiredPeers()
-	if deleted := svc.reconcileStoreWithSubnets(); len(deleted) > 0 {
-		if err := svc.store.PersistDeleteBatch(deleted...); err != nil {
-			return fmt.Errorf("save peer store after reconcile: %w", err)
-		}
-	}
 	return nil
 }
 
@@ -348,28 +355,42 @@ func (s *WireGuardService) reconcileStoreWithDevice() error {
 // reconcileStoreWithSubnets removes from store and from the device any record whose allowed_ips
 // are not entirely within the current config subnets (subnet4/subnet6).
 // Returns the peer IDs that were successfully removed.
-func (s *WireGuardService) reconcileStoreWithSubnets() []string {
-	var outOfSubnet []PeerRecord
+// validateStoredPeers refuses to start when stored peers no longer fit the
+// config: an address outside the configured subnets, the server address, or
+// an address held by two peers. The node used to delete out-of-subnet peers
+// here, which turned a subnet typo into permanent loss of every peer.
+func (s *WireGuardService) validateStoredPeers() error {
+	owner := make(map[string]string)
+	for _, ip := range []net.IP{s.serverIP4, s.serverIP6} {
+		if ip != nil {
+			owner[ip.String()] = "the server"
+		}
+	}
+	var outside []string
+	var conflicts []string
 	s.store.ForEach(func(rec PeerRecord) {
 		if !s.recordAllowedIPsInSubnets(rec) {
-			outOfSubnet = append(outOfSubnet, rec)
+			outside = append(outside, rec.PeerID)
+		}
+		for _, aip := range rec.AllowedIPs {
+			key := aip.IP.String()
+			if prev, ok := owner[key]; ok {
+				conflicts = append(conflicts, fmt.Sprintf("%s is used by peer %s and %s", key, rec.PeerID, prev))
+				continue
+			}
+			owner[key] = "peer " + rec.PeerID
 		}
 	})
-	var deleted []string
-	for _, rec := range outOfSubnet {
-		if err := s.configureDevice(wgtypes.Config{
-			Peers: []wgtypes.PeerConfig{{PublicKey: rec.PublicKey, Remove: true}},
-		}); err != nil {
-			// Do not remove from store when device removal fails: removing the store
-			// record while the peer remains on the device would create an orphan that
-			// is invisible to the store and won't be cleaned up on restart.
-			slog.Error("reconcile: failed to remove peer from device, skipping store removal", "peerId", rec.PeerID, "error", err)
-			continue
-		}
-		s.store.Delete(rec.PeerID)
-		deleted = append(deleted, rec.PeerID)
+	if len(outside) > 0 {
+		return fmt.Errorf("%d stored peer(s) have addresses outside the configured subnets (first: %s); "+
+			"no peers were changed. Restore the previous wireguard.subnet/subnet6, or delete these peers "+
+			"through the API before changing the subnets", len(outside), outside[0])
 	}
-	return deleted
+	if len(conflicts) > 0 {
+		return fmt.Errorf("peer store has %d address conflict(s) (first: %s); no peers were changed. "+
+			"Delete the conflicting peers through the API or fix wireguard.server_ip/server_ip6", len(conflicts), conflicts[0])
+	}
+	return nil
 }
 
 func (s *WireGuardService) recordAllowedIPsInSubnets(rec PeerRecord) bool {
@@ -555,6 +576,9 @@ func (s *WireGuardService) EnsurePeer(peerID string, expiresAt *time.Time, addre
 	defer s.mu.Unlock()
 
 	if record, ok := s.store.Get(peerID); ok {
+		if expiresAt == nil && record.ExpiresAt != nil && !time.Now().Before(*record.ExpiresAt) {
+			return PeerInfo{}, ErrPeerExpired
+		}
 		return s.rotatePeer(peerID, record, expiresAt)
 	}
 	return s.createPeer(peerID, expiresAt, addressFamilies)
@@ -657,33 +681,47 @@ func (s *WireGuardService) ServerInfo() (string, int, error) {
 }
 
 // DeletePeer removes a peer and returns the AllowedIPs that were freed (for
-// audit logging). On persist failure the peer remains absent in memory and on
-// the device but present in bbolt; the next startup reconcile re-installs it.
-// Operators should retry the delete or remove the bbolt record manually.
+// audit logging). Like create and rotate it is write-ahead and runs entirely
+// under s.mu: the bbolt record is deleted first, then the device peer; if the
+// device call fails the record is restored. A crash in between leaves the
+// peer only on the device, and startup reconcile removes it.
 func (s *WireGuardService) DeletePeer(peerID string) ([]string, error) {
-	allowedIPs, err := s.doDeletePeer(peerID)
-	if err != nil {
-		return nil, err
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	record, ok := s.store.Get(peerID)
+	if !ok {
+		return nil, ErrPeerNotFound
 	}
 	if err := s.store.PersistDeleteBatch(peerID); err != nil {
 		return nil, fmt.Errorf(errSavePeerStoreFmt, err)
 	}
-	return allowedIPs, nil
-}
-
-// removePeerUnsafe removes a peer from the WireGuard device, store, and usedIPs cache.
-// Must be called with s.mu held.
-func (s *WireGuardService) removePeerUnsafe(record PeerRecord) error {
 	remove := wgtypes.PeerConfig{PublicKey: record.PublicKey, Remove: true}
 	if err := s.configureDevice(wgtypes.Config{Peers: []wgtypes.PeerConfig{remove}}); err != nil {
-		return err
+		rbErr := s.store.PersistPut(record)
+		if rbErr != nil {
+			slog.Error("rollback persist after delete failure",
+				"peerId", peerID, "rollback_error", rbErr, "device_error", err)
+		}
+		s.notifyRollback(rollbackOpDelete, rbErr)
+		return nil, err
 	}
+	s.forgetPeerLocked(record)
+	out := make([]string, len(record.AllowedIPs))
+	for i := range record.AllowedIPs {
+		out[i] = record.AllowedIPs[i].String()
+	}
+	return out, nil
+}
+
+// forgetPeerLocked drops a peer that is already gone from bbolt and the device
+// from the in-memory store and frees its addresses. Must be called with s.mu held.
+func (s *WireGuardService) forgetPeerLocked(record PeerRecord) {
 	s.store.Delete(record.PeerID)
 	for _, aip := range record.AllowedIPs {
 		delete(s.usedIPs, aip.IP.String())
 		s.retractAllocHint(aip.IP)
 	}
-	return nil
 }
 
 // retractAllocHint rolls back the ring-buffer allocation hint when an IP is
@@ -705,27 +743,6 @@ func (s *WireGuardService) retractAllocHint(ip net.IP) {
 	if !ipAfterIPv6(ip16, s.lastAllocated6) {
 		s.lastAllocated6 = prevIPv6(ip16)
 	}
-}
-
-// doDeletePeer performs all in-memory and device mutations under s.mu and
-// returns the AllowedIPs that were freed. The caller persists the deletion
-// after releasing the lock.
-func (s *WireGuardService) doDeletePeer(peerID string) ([]string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	record, ok := s.store.Get(peerID)
-	if !ok {
-		return nil, ErrPeerNotFound
-	}
-	if err := s.removePeerUnsafe(record); err != nil {
-		return nil, err
-	}
-	out := make([]string, len(record.AllowedIPs))
-	for i := range record.AllowedIPs {
-		out[i] = record.AllowedIPs[i].String()
-	}
-	return out, nil
 }
 
 func (s *WireGuardService) Stats() (Stats, error) {

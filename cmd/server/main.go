@@ -29,6 +29,11 @@ const (
 	// to finish an in-flight expiry pass before giving up. Must exceed wgOpTimeout
 	// (10 s) to allow a running configureDevice call to complete.
 	cleanupShutdownTimeout = 15 * time.Second
+
+	// httpShutdownTimeout bounds how long in-flight API requests may run after
+	// a shutdown signal. Together with the cleanup wait it stays under the
+	// compose files' stop_grace_period (30s).
+	httpShutdownTimeout = 10 * time.Second
 )
 
 func main() {
@@ -118,19 +123,21 @@ func main() {
 		slog.Info("shutdown signal received", "signal", sig)
 	}
 
+	// Stop taking API writes first and let in-flight requests finish, then stop
+	// the cleanup loop and metrics; the deferred wgService.Close runs last, so no
+	// peer change can race the peer store being closed.
+	ctx, cancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
+	defer cancel()
+	if err := httpServer.Shutdown(ctx); err != nil {
+		slog.Error("shutdown error", "error", err)
+	}
 	appCancel()
 	select {
 	case <-cleanupDone:
 	case <-time.After(cleanupShutdownTimeout):
 		slog.Warn("cleanup goroutine did not finish in time, proceeding with shutdown")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := httpServer.Shutdown(ctx); err != nil {
-		slog.Error("shutdown error", "error", err)
-	}
-	// Wait for the metrics listener (if enabled) to finish too. metrics.Run
-	// reacts to appCancel and shuts down its own server with a 5s budget.
+	// metrics.Run reacts to appCancel and shuts down its own server with a 5s budget.
 	<-metricsDone
 }
 

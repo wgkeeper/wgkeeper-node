@@ -35,6 +35,10 @@ The node refuses to start if the config still contains a removed key (`server.tl
 
 ### Fixed
 
+- **Breaking:** the node no longer deletes stored peers that fall outside the configured subnets. A subnet typo used to wipe every peer on the next restart; now startup fails with an error and nothing is deleted. Startup also fails when a stored peer holds the server address or shares an address with another peer.
+- Deleting a peer and expiring peers are now write-ahead under the service lock, like create and rotate. Before, the bbolt delete ran after the lock was released: a concurrent create of the same peer could have its new record deleted, and a failed bbolt write could bring a revoked peer back on restart.
+- Rotating a peer whose expiry has passed without a new `expiresAt` returns `409 peer_expired` instead of `200` followed by deletion within a minute.
+- Shutdown stops the HTTP server before the cleanup loop and the peer store, and a write after the store is closed returns an error instead of silently doing nothing. The compose files set `stop_grace_period: 30s` so Docker doesn't kill the node mid-shutdown.
 - A configured `peer_store_file` that did not exist yet was never created, so nothing was persisted until the file was created by hand.
 
 ### Security

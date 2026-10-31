@@ -337,6 +337,9 @@ func peerError(err error) (int, string, string) {
 	if errors.Is(err, wireguard.ErrNoAvailableIP) {
 		return http.StatusConflict, "no available ip addresses", "no_available_ip"
 	}
+	if errors.Is(err, wireguard.ErrPeerExpired) {
+		return http.StatusConflict, "peer has expired; pass a future expiresAt to renew it", "peer_expired"
+	}
 	if errors.Is(err, wireguard.ErrUnsupportedAddressFamily) {
 		return http.StatusBadRequest, "requested address family is not supported by this node", "unsupported_address_family"
 	}

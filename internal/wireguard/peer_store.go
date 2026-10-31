@@ -35,6 +35,10 @@ type peerRecordStored struct {
 
 var peersBucket = []byte("peers")
 
+// ErrStoreClosed is returned by persist calls after Close, so a write that
+// races shutdown fails loudly instead of looking like a successful no-op.
+var ErrStoreClosed = errors.New("peer store is closed")
+
 func storedToRecord(s peerRecordStored) (PeerRecord, error) {
 	if strings.TrimSpace(s.PeerID) == "" {
 		return PeerRecord{}, errors.New("peer_id is required and must be non-empty")
@@ -94,7 +98,8 @@ type PeerStore struct {
 	saveMu     sync.Mutex // serializes bbolt writes
 	peers      map[string]PeerRecord
 	sortedKeys []peerSortKey // maintained in (CreatedAt asc, PeerID asc) order
-	db         *bolt.DB      // nil = in-memory only; open for the lifetime of the store
+	db         *bolt.DB      // nil = in-memory only (tests); open for the lifetime of the store
+	closed     bool          // set by Close; guarded by saveMu
 }
 
 func NewPeerStore() *PeerStore {
@@ -254,6 +259,7 @@ func (s *PeerStore) OpenFile(path string) error {
 func (s *PeerStore) Close() error {
 	s.saveMu.Lock()
 	defer s.saveMu.Unlock()
+	s.closed = true
 	if s.db == nil {
 		return nil
 	}
@@ -266,6 +272,9 @@ func (s *PeerStore) Close() error {
 func (s *PeerStore) PersistPut(record PeerRecord) error {
 	s.saveMu.Lock()
 	defer s.saveMu.Unlock()
+	if s.closed {
+		return ErrStoreClosed
+	}
 	if s.db == nil {
 		return nil
 	}
@@ -294,6 +303,9 @@ func (s *PeerStore) PersistDeleteBatch(peerIDs ...string) error {
 	}
 	s.saveMu.Lock()
 	defer s.saveMu.Unlock()
+	if s.closed {
+		return ErrStoreClosed
+	}
 	if s.db == nil {
 		return nil
 	}

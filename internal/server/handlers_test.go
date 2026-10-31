@@ -231,6 +231,20 @@ func TestCreatePeerUnsupportedAddressFamily(t *testing.T) {
 	assertJSONErrorCode(t, rec.Body.Bytes(), "unsupported_address_family")
 }
 
+func TestCreatePeerExpiredRotation(t *testing.T) {
+	router := newTestRouter()
+	router.POST(pathPeers, apiKeyMiddleware(testAPIKey), createPeerHandler(mockWGService{
+		ensurePeerFunc: func(string, *time.Time, []string) (wireguard.PeerInfo, error) {
+			return wireguard.PeerInfo{}, wireguard.ErrPeerExpired
+		},
+	}, nil))
+
+	body := []byte(`{"peerId":"550e8400-e29b-41d4-a716-446655440000"}`)
+	rec := performRequest(t, router, http.MethodPost, pathPeers, body, testAPIKey)
+	assertStatus(t, rec, http.StatusConflict)
+	assertJSONErrorCode(t, rec.Body.Bytes(), "peer_expired")
+}
+
 func TestCreatePeerServerInfoError(t *testing.T) {
 	router := newTestRouter()
 	router.POST(pathPeers, apiKeyMiddleware(testAPIKey), createPeerHandler(mockWGService{

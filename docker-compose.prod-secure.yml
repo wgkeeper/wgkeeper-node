@@ -2,6 +2,8 @@ services:
   wireguard:
     image: ghcr.io/wgkeeper/node
     restart: always
+    # Graceful shutdown waits for in-flight API requests and the expiry cleanup.
+    stop_grace_period: 30s
     cap_add:
       - NET_ADMIN
       - SYS_MODULE

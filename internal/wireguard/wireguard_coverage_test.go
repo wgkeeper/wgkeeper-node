@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -254,87 +255,64 @@ func TestSetupSubnet6IPv4Rejected(t *testing.T) {
 	}
 }
 
-// ---------- reconcileStoreWithSubnets ----------
+// ---------- validateStoredPeers ----------
 
-func TestReconcileStoreWithSubnetsPeerInsideKept(t *testing.T) {
+func newValidateTestService(t *testing.T) *WireGuardService {
+	t.Helper()
 	_, subnet4, _ := net.ParseCIDR(subnetTestCIDR)
-	key, _ := wgtypes.GenerateKey()
-	svc := &WireGuardService{
+	return &WireGuardService{
 		client:     fakeWGClient{device: &wgtypes.Device{}},
 		deviceName: "wg0",
 		subnet4:    subnet4,
 		serverIP4:  net.ParseIP(ipServerTest),
 		store:      NewPeerStore(),
 	}
-	svc.store.Set(PeerRecord{
-		PeerID:       "inside-peer",
-		PublicKey:    key,
-		PresharedKey: wgtypes.Key{},
-		AllowedIPs:   mustParseCIDRs(t, testPeerIP4),
-	})
+}
 
-	deleted := svc.reconcileStoreWithSubnets()
-	if len(deleted) != 0 {
-		t.Error("expected no change: peer is inside subnet")
-	}
-	if _, ok := svc.store.Get("inside-peer"); !ok {
-		t.Error("peer should remain in store")
+func setTestPeer(t *testing.T, svc *WireGuardService, peerID, cidr string) {
+	t.Helper()
+	key, _ := wgtypes.GenerateKey()
+	svc.store.Set(PeerRecord{PeerID: peerID, PublicKey: key, AllowedIPs: mustParseCIDRs(t, cidr)})
+}
+
+func TestValidateStoredPeersInsideOK(t *testing.T) {
+	svc := newValidateTestService(t)
+	setTestPeer(t, svc, "inside-peer", testPeerIP4)
+	if err := svc.validateStoredPeers(); err != nil {
+		t.Fatalf("expected no error, got %v", err)
 	}
 }
 
-func TestReconcileStoreWithSubnetsOutsidePeerRemoved(t *testing.T) {
-	_, subnet4, _ := net.ParseCIDR(subnetTestCIDR)
-	key, _ := wgtypes.GenerateKey()
-	svc := &WireGuardService{
-		client:     fakeWGClient{device: &wgtypes.Device{}},
-		deviceName: "wg0",
-		subnet4:    subnet4,
-		serverIP4:  net.ParseIP(ipServerTest),
-		store:      NewPeerStore(),
-	}
-	svc.store.Set(PeerRecord{
-		PeerID:       testOutsidePeerID,
-		PublicKey:    key,
-		PresharedKey: wgtypes.Key{},
-		AllowedIPs:   mustParseCIDRs(t, "192.168.1.5/32"),
-	})
-
-	deleted := svc.reconcileStoreWithSubnets()
-	if len(deleted) == 0 {
-		t.Error("expected deletion: peer is outside subnet")
-	}
-	if _, ok := svc.store.Get(testOutsidePeerID); ok {
-		t.Error("peer should have been removed from store")
-	}
-}
-
-func TestReconcileStoreWithSubnetsDeviceErrorLogged(t *testing.T) {
-	// ConfigureDevice fails: peer must NOT be removed from the store to keep
-	// store and device in sync. Removing the store record while the peer still
-	// exists on the device would create an orphan invisible to the application.
-	_, subnet4, _ := net.ParseCIDR(subnetTestCIDR)
-	key, _ := wgtypes.GenerateKey()
-	svc := &WireGuardService{
-		client:     fakeWGClient{device: &wgtypes.Device{}, configureErr: errors.New(testErrDeviceBusyMessage)},
-		deviceName: "wg0",
-		subnet4:    subnet4,
-		serverIP4:  net.ParseIP(ipServerTest),
-		store:      NewPeerStore(),
-	}
-	svc.store.Set(PeerRecord{
-		PeerID:       testOutsidePeerID,
-		PublicKey:    key,
-		PresharedKey: wgtypes.Key{},
-		AllowedIPs:   mustParseCIDRs(t, "192.168.1.5/32"),
-	})
-
-	deleted := svc.reconcileStoreWithSubnets()
-	if len(deleted) != 0 {
-		t.Error("expected no deletion: store removal must be skipped when device removal fails")
+// TestValidateStoredPeersOutsideRefusesToStart guards against the old
+// behaviour where a subnet typo in config.yaml deleted every stored peer.
+func TestValidateStoredPeersOutsideRefusesToStart(t *testing.T) {
+	svc := newValidateTestService(t)
+	setTestPeer(t, svc, testOutsidePeerID, "192.168.1.5/32")
+	err := svc.validateStoredPeers()
+	if err == nil || !strings.Contains(err.Error(), "outside the configured subnets") {
+		t.Fatalf("expected an out-of-subnet error, got %v", err)
 	}
 	if _, ok := svc.store.Get(testOutsidePeerID); !ok {
-		t.Error("peer must remain in store when device removal fails to keep store and device in sync")
+		t.Error("peer must not be removed")
 	}
+}
+
+func TestValidateStoredPeersAddressConflicts(t *testing.T) {
+	t.Run("two_peers_same_ip", func(t *testing.T) {
+		svc := newValidateTestService(t)
+		setTestPeer(t, svc, "peer-a", testPeerIP4)
+		setTestPeer(t, svc, "peer-b", testPeerIP4)
+		if err := svc.validateStoredPeers(); err == nil || !strings.Contains(err.Error(), "conflict") {
+			t.Fatalf("expected an address conflict error, got %v", err)
+		}
+	})
+	t.Run("peer_holds_server_ip", func(t *testing.T) {
+		svc := newValidateTestService(t)
+		setTestPeer(t, svc, "peer-a", ipServerTest+"/32")
+		if err := svc.validateStoredPeers(); err == nil || !strings.Contains(err.Error(), "the server") {
+			t.Fatalf("expected a server address conflict error, got %v", err)
+		}
+	})
 }
 
 // ---------- reconcileStoreWithDevice ----------

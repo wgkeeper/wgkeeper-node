@@ -660,33 +660,29 @@ func TestPeerRecordToListItemWithExpiresAt(t *testing.T) {
 	}
 }
 
-func TestRemovePeerUnsafeRemovesFromStoreAndUsedIPs(t *testing.T) {
-	svc := newTestServiceWithSubnet(t, nil)
-	key, _ := wgtypes.GenerateKey()
-	peerIP := ipNet(t, ipPeerTest)
-	record := PeerRecord{
-		PeerID:       peerIDTest,
-		PublicKey:    key,
-		PresharedKey: wgtypes.Key{},
-		AllowedIPs:   []net.IPNet{peerIP},
-		CreatedAt:    time.Now().UTC(),
+// persistedRecord reopens the bbolt file behind svc after closing it and
+// reports whether peerID is stored there.
+func persistedRecord(t *testing.T, svc *WireGuardService, path, peerID string) bool {
+	t.Helper()
+	if err := svc.store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
 	}
-	svc.store.Set(record)
-	svc.usedIPs = map[string]struct{}{ipPeerTest: {}}
-
-	if err := svc.removePeerUnsafe(record); err != nil {
-		t.Fatalf("removePeerUnsafe: %v", err)
+	reopened := NewPeerStore()
+	if err := reopened.OpenFile(path); err != nil {
+		t.Fatalf("reopen store: %v", err)
 	}
-	if _, ok := svc.store.Get(peerIDTest); ok {
-		t.Error("peer should be removed from store")
-	}
-	if _, ok := svc.usedIPs[ipPeerTest]; ok {
-		t.Error("IP should be removed from usedIPs")
-	}
+	defer reopened.Close()
+	_, ok := reopened.Get(peerID)
+	return ok
 }
 
-func TestRemovePeerUnsafeDeviceError(t *testing.T) {
-	svc := newTestServiceWithSubnet(t, errors.New("device busy"))
+func newPersistedTestService(t *testing.T, configureErr error) (*WireGuardService, PeerRecord, string) {
+	t.Helper()
+	svc := newTestServiceWithSubnet(t, configureErr)
+	path := t.TempDir() + peersDBFile
+	if err := svc.store.OpenFile(path); err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
 	key, _ := wgtypes.GenerateKey()
 	record := PeerRecord{
 		PeerID:       peerIDTest,
@@ -695,17 +691,109 @@ func TestRemovePeerUnsafeDeviceError(t *testing.T) {
 		AllowedIPs:   []net.IPNet{ipNet(t, ipPeerTest)},
 		CreatedAt:    time.Now().UTC(),
 	}
+	if err := svc.store.PersistPut(record); err != nil {
+		t.Fatalf("PersistPut: %v", err)
+	}
 	svc.store.Set(record)
 	svc.usedIPs = map[string]struct{}{ipPeerTest: {}}
+	return svc, record, path
+}
 
-	if svc.removePeerUnsafe(record) == nil {
+func TestDeletePeerRemovesEverywhere(t *testing.T) {
+	svc, _, path := newPersistedTestService(t, nil)
+
+	if _, err := svc.DeletePeer(peerIDTest); err != nil {
+		t.Fatalf("DeletePeer: %v", err)
+	}
+	if _, ok := svc.store.Get(peerIDTest); ok {
+		t.Error("peer should be removed from memory")
+	}
+	if _, ok := svc.usedIPs[ipPeerTest]; ok {
+		t.Error("IP should be released")
+	}
+	if persistedRecord(t, svc, path, peerIDTest) {
+		t.Error("peer should be removed from bbolt")
+	}
+}
+
+// TestDeletePeerDeviceErrorRestoresRecord checks the write-ahead rollback: the
+// bbolt delete happens first and is undone when the device call fails, so a
+// failed delete leaves the peer intact everywhere and a retry can succeed.
+func TestDeletePeerDeviceErrorRestoresRecord(t *testing.T) {
+	svc, _, path := newPersistedTestService(t, errors.New("device busy"))
+
+	if _, err := svc.DeletePeer(peerIDTest); err == nil {
 		t.Fatal("expected error from device, got nil")
 	}
 	if _, ok := svc.store.Get(peerIDTest); !ok {
-		t.Error("peer should remain in store when device removal fails")
+		t.Error("peer should remain in memory when device removal fails")
 	}
 	if _, ok := svc.usedIPs[ipPeerTest]; !ok {
-		t.Error("IP should remain in usedIPs when device removal fails")
+		t.Error("IP should stay allocated when device removal fails")
+	}
+	if !persistedRecord(t, svc, path, peerIDTest) {
+		t.Error("bbolt record should be restored when device removal fails")
+	}
+}
+
+func TestEnsurePeerRotateExpired(t *testing.T) {
+	past := time.Now().Add(-time.Minute).UTC()
+	future := time.Now().Add(time.Hour).UTC()
+
+	t.Run("without_new_expiry_is_rejected", func(t *testing.T) {
+		svc, record, _ := newPersistedTestService(t, nil)
+		record.ExpiresAt = &past
+		svc.store.Set(record)
+		if _, err := svc.EnsurePeer(peerIDTest, nil, nil); !errors.Is(err, ErrPeerExpired) {
+			t.Fatalf("expected ErrPeerExpired, got %v", err)
+		}
+	})
+
+	t.Run("with_future_expiry_renews", func(t *testing.T) {
+		svc, record, _ := newPersistedTestService(t, nil)
+		record.ExpiresAt = &past
+		svc.store.Set(record)
+		info, err := svc.EnsurePeer(peerIDTest, &future, nil)
+		if err != nil || !info.Rotated {
+			t.Fatalf("expected a successful rotation, got %+v, %v", info, err)
+		}
+		got, _ := svc.store.Get(peerIDTest)
+		if got.ExpiresAt == nil || !got.ExpiresAt.Equal(future) {
+			t.Errorf("expiry should be renewed, got %v", got.ExpiresAt)
+		}
+	})
+}
+
+// TestCleanupDeviceErrorRestoresRecords checks that expiry cleanup is
+// write-ahead too: records deleted from bbolt are put back when the device
+// call fails, so the peers are retried on the next pass instead of lost.
+func TestCleanupDeviceErrorRestoresRecords(t *testing.T) {
+	svc, record, path := newPersistedTestService(t, errors.New("device busy"))
+	past := time.Now().Add(-time.Minute).UTC()
+	record.ExpiresAt = &past
+	svc.store.Set(record)
+
+	if _, err := svc.doCleanupBatch([]string{peerIDTest}, time.Now().UTC()); err == nil {
+		t.Fatal("expected error from device, got nil")
+	}
+	if _, ok := svc.store.Get(peerIDTest); !ok {
+		t.Error("peer should remain in memory when device removal fails")
+	}
+	if !persistedRecord(t, svc, path, peerIDTest) {
+		t.Error("bbolt record should be restored when device removal fails")
+	}
+}
+
+func TestPersistAfterCloseFails(t *testing.T) {
+	svc, record, _ := newPersistedTestService(t, nil)
+	if err := svc.store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := svc.store.PersistPut(record); !errors.Is(err, ErrStoreClosed) {
+		t.Errorf("PersistPut after Close: got %v, want ErrStoreClosed", err)
+	}
+	if err := svc.store.PersistDeleteBatch(record.PeerID); !errors.Is(err, ErrStoreClosed) {
+		t.Errorf("PersistDeleteBatch after Close: got %v, want ErrStoreClosed", err)
 	}
 }
 
