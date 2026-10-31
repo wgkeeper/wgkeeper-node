@@ -58,7 +58,7 @@ flowchart LR
   WG --> WAN[(WAN / Internet)]
 ```
 
-On startup the node writes `/etc/wireguard/<interface>.conf` if it does not exist (`./wireguard/<interface>.conf` when not running as root). In the Docker image, `entrypoint.sh` then brings the interface up with `wg-quick` and starts the API. From then on, every peer change goes through the API.
+On every start the node writes `/etc/wireguard/<interface>.conf` (`./wireguard/<interface>.conf` when not running as root) from `config.yaml`: addresses, listen port and NAT rules. The server private key is generated on the first start and kept in that file afterwards, so the server's public key never changes. Don't edit the file by hand; change `config.yaml` instead. In the Docker image, `entrypoint.sh` then brings the interface up with `wg-quick` and starts the API. From then on, every peer change goes through the API.
 
 ## Quick start
 
@@ -199,7 +199,7 @@ go run ./cmd/server
 | Command | Description |
 |---------|-------------|
 | *(no arguments)* | Start the API server |
-| `init` | Create the WireGuard config if it is missing, then exit |
+| `init` | Write the WireGuard config from `config.yaml`, then exit |
 | `init --print-path` | Same as `init`, and print the config path to stdout |
 
 ## API reference

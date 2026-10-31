@@ -16,7 +16,7 @@ const (
 	testBinName     = "wgkeeper-node"
 	testWGInterface = "wg0"
 	testWGServerIP  = "10.0.0.1"
-	testWGConfBody  = "[Interface]\nPrivateKey = x\n"
+	testWGConfBody  = "[Interface]\nPrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=\n"
 	testErrGotFmt   = "got %q"
 	testErrGotMsg   = "got: %s"
 	testDirWG       = "wireguard"
@@ -135,6 +135,7 @@ func TestHandleInitInit(t *testing.T) {
 		WGSubnet:     testSubnet4,
 		WGServerIP:   testWGServerIP,
 		WGListenPort: 51820,
+		WANInterface: "eth0",
 	}
 	handled, err := handleInit(cfg, []string{testBinName, "init"})
 	if err != nil {
@@ -168,6 +169,7 @@ func TestHandleInitInitPrintPath(t *testing.T) {
 		WGSubnet:     testSubnet4,
 		WGServerIP:   testWGServerIP,
 		WGListenPort: 51820,
+		WANInterface: "eth0",
 	}
 	handled, err := handleInit(cfg, []string{testBinName, "init", "--print-path"})
 	if err != nil {

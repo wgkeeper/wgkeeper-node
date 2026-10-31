@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/wgkeeper/wgkeeper-node/internal/config"
+
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
 const (
@@ -263,7 +265,10 @@ func TestEnsureWireGuardConfigNew(t *testing.T) {
 	}
 }
 
-func TestEnsureWireGuardConfigExisting(t *testing.T) {
+// chdirTemp runs the test in a temp dir so non-root defaultConfigPath
+// resolves to ./wireguard/<iface>.conf inside it.
+func chdirTemp(t *testing.T) string {
+	t.Helper()
 	dir := t.TempDir()
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -272,30 +277,91 @@ func TestEnsureWireGuardConfigExisting(t *testing.T) {
 	if err := os.Chdir(dir); err != nil {
 		t.Fatalf("chdir: %v", err)
 	}
-	defer func() { _ = os.Chdir(cwd) }()
+	t.Cleanup(func() { _ = os.Chdir(cwd) })
+	return dir
+}
 
-	// Pre-create the config so EnsureWireGuardConfig returns the existing path
+func writeExistingConf(t *testing.T, dir, content string) string {
+	t.Helper()
 	wgDir := filepath.Join(dir, "wireguard")
 	if err := os.MkdirAll(wgDir, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	existingPath := filepath.Join(wgDir, "wgtest.conf")
-	if err := os.WriteFile(existingPath, []byte("[Interface]\n"), 0o600); err != nil {
+	path := filepath.Join(wgDir, "wgtest.conf")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
+	return path
+}
 
-	cfg := config.Config{WGInterface: "wgtest", WGSubnet: subnetTestCIDR, WGListenPort: 51820}
+func TestEnsureWireGuardConfigRegeneratesKeepingKey(t *testing.T) {
+	dir := chdirTemp(t)
+	key, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	// Written on an earlier start with another port and subnet.
+	writeExistingConf(t, dir, "[Interface]\nPrivateKey = "+key.String()+"\nAddress = 10.9.0.1/24\nListenPort = 40000\n")
+
+	cfg := config.Config{WGInterface: "wgtest", WGSubnet: subnetTestCIDR, WGServerIP: ipServerTest, WGListenPort: 51820, WANInterface: "eth0"}
 	path, err := EnsureWireGuardConfig(cfg)
 	if err != nil {
 		t.Fatalf("EnsureWireGuardConfig(existing): %v", err)
 	}
-	// Verify the returned path still points to the original file
 	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read returned path: %v", err)
+		t.Fatalf("read: %v", err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "PrivateKey = "+key.String()) {
+		t.Errorf("server private key must be preserved, got:\n%s", got)
+	}
+	if !strings.Contains(got, "ListenPort = 51820") || !strings.Contains(got, "Address = 10.0.0.1/24") {
+		t.Errorf("config must reflect config.yaml, got:\n%s", got)
+	}
+	if strings.Contains(got, "40000") || strings.Contains(got, "10.9.0.1") {
+		t.Errorf("stale values must be gone, got:\n%s", got)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("config mode: got %v, want 0600", info.Mode().Perm())
+	}
+}
+
+func TestEnsureWireGuardConfigExistingWithoutKey(t *testing.T) {
+	dir := chdirTemp(t)
+	path := writeExistingConf(t, dir, "[Interface]\n")
+
+	cfg := config.Config{WGInterface: "wgtest", WGSubnet: subnetTestCIDR, WGListenPort: 51820, WANInterface: "eth0"}
+	if _, err := EnsureWireGuardConfig(cfg); err == nil {
+		t.Fatal("expected an error instead of silently replacing the server key")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
 	}
 	if string(data) != "[Interface]\n" {
-		t.Errorf("expected original file content, got %q", data)
+		t.Errorf("file must be left untouched on error, got %q", data)
+	}
+}
+
+func TestPrivateKeyFromConfig(t *testing.T) {
+	key, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	got, err := privateKeyFromConfig([]byte("[Interface]\nAddress = 10.0.0.1/24\n  privatekey=" + key.String() + "  \n"))
+	if err != nil || got != key {
+		t.Fatalf("got %v, %v; want the key", got, err)
+	}
+	if _, err := privateKeyFromConfig([]byte("PrivateKey = not-a-key\n")); err == nil {
+		t.Error("expected an error for an invalid key")
+	}
+	if _, err := privateKeyFromConfig([]byte("[Interface]\n")); err == nil {
+		t.Error("expected an error when PrivateKey is missing")
 	}
 }
 

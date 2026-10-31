@@ -24,7 +24,8 @@ The node refuses to start if the config still contains a removed key (`server.tl
 ### Changed
 
 - Peers are always persisted to a bbolt file, `/var/lib/wgkeeper/peers.db` by default; `wireguard.peer_store_file` only changes the path. Both compose files mount `./data` there. If you used `/app/peers/peers.db` with a `./peers` volume, either keep `peer_store_file` and that volume, or move `peers.db` into `./data`.
-- `wireguard.routing.wan_interface` is optional: the interface of the default route is used when it is unset. It applies when the WireGuard config is first written; an existing `/etc/wireguard/<interface>.conf` keeps its rules.
+- `wireguard.routing.wan_interface` is optional: the interface of the default route is used when it is unset.
+- `/etc/wireguard/<interface>.conf` is rewritten from `config.yaml` on every start instead of only on the first one, so changed subnets, listen port or WAN interface take effect. The server private key is kept from the existing file; the node refuses to start if that file has no valid `PrivateKey` rather than generating a new one. Manual edits to the file are overwritten.
 - `DEBUG` only switches logs to debug level. Errors behind a `4xx`/`5xx` response are always logged with the request ID, method, path and client address.
 - `docker-compose.prod-secure.yml`: Caddy now runs in the node container's network namespace and proxies to `127.0.0.1:51821`. Ports `80` and `443` are published on the `wireguard` service. No bridge subnet or proxy trust settings are needed.
 - `docker-compose.local.yml`: the API is published on `127.0.0.1:51821` only, and the health check uses HTTP.
