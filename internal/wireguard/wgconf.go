@@ -75,7 +75,7 @@ func EnsureWireGuardConfig(cfg config.Config) (string, error) {
 
 // privateKeyFromConfig returns the [Interface] PrivateKey of a wg-quick config.
 func privateKeyFromConfig(data []byte) (wgtypes.Key, error) {
-	for _, line := range strings.Split(string(data), "\n") {
+	for line := range strings.SplitSeq(string(data), "\n") {
 		name, value, ok := strings.Cut(line, "=")
 		if !ok || !strings.EqualFold(strings.TrimSpace(name), "PrivateKey") {
 			continue

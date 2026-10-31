@@ -1,6 +1,6 @@
 # Benchmark Snapshot
 
-Date: 2026-04-30
+Date: 2026-10-31 (rows changed in 1.4.0 re-measured; the rest from 2026-04-30)
 Host: darwin arm64 (Apple M2 Pro)  
 Go packages: `./internal/wireguard ./internal/server`  
 Command:
@@ -54,15 +54,15 @@ Values below use the median of 3 runs for readability.
 - `PersistPut` (~5.8 ms) is dominated by bbolt's fsync-per-commit guarantee — this is the cost of durability, not code overhead. In-memory operations are unaffected.
 - `OpenFile` (~436 µs for 200 peers) is a one-time startup cost; irrelevant to steady-state throughput.
 - API handlers are fast in absolute terms (about 1-6 µs), with moderate allocation cost.
-- `BenchmarkAllocateOneIPv4NearlyFull` is intentionally a worst-case scenario and expected to be slower.
-- `CreatePeerHandler` allocs grew from the previous snapshot (42 → 54) because audit-log fields (`client_ip`, `request_id`, `allowedIPs`, `expiresAt`) were added with the write-ahead persist work; trivial in absolute cost given that peer creation is orchestrator-driven (low rate, not data-plane).
+- The 50k-peer benchmarks (`ListPeersPage50k`, `CleanupExpire5kOf50k`) show that list pages and expiry stay cheap at node scale; allocating an address after a delete is O(log n) (`IPPoolAllocateAfterDelete`).
+- `APIKeyMiddleware` is about 100 ns slower than before 1.4.0 because the key is compared as a SHA-256 digest, which hides its length; negligible next to a peer operation.
 - Current performance baseline is strong; the largest optimization headroom is reducing API handler allocations.
 
 ## Benchmark Legend
 
-- `BenchmarkAllocateOneIPv4`: allocate one IPv4 address in a typical free-space case.
-- `BenchmarkAllocateOneIPv4NearlyFull`: allocate one IPv4 address when the subnet is almost exhausted (worst case).
-- `BenchmarkAllocateOneIPv6`: allocate one IPv6 address in a typical free-space case.
+- `BenchmarkIPPoolAllocateAfterDelete`: free one address in a /16 holding 50k peers and allocate it again.
+- `BenchmarkListPeersPage50k`: one `ListPeers` page of 100 at 50k peers.
+- `BenchmarkCleanupExpire5kOf50k`: one expiry pass removing 5k of 50k peers.
 - `BenchmarkEnsurePeerRotate`: rotate an existing peer (refresh keys/expiry).
 - `BenchmarkEnsurePeerNew`: create a new peer with address assignment and key generation.
 - `BenchmarkDeletePeer`: delete an existing peer and cleanup related state.
@@ -85,12 +85,12 @@ Values below use the median of 3 runs for readability.
 
 | Benchmark | ns/op (median) | B/op | allocs/op |
 |---|---:|---:|---:|
-| BenchmarkAllocateOneIPv4 | 139.9 | 288 | 8 |
-| BenchmarkAllocateOneIPv4NearlyFull | 10752 | 4064 | 510 |
-| BenchmarkAllocateOneIPv6 | 275.9 | 360 | 9 |
-| BenchmarkEnsurePeerRotate | 43971 | 1376 | 25 |
-| BenchmarkEnsurePeerNew | 44614 | 1869 | 36 |
-| BenchmarkDeletePeer | 2550 | 736 | 13 |
+| BenchmarkIPPoolAllocateAfterDelete | 139.6 | 48 | 2 |
+| BenchmarkListPeersPage50k | 30865 | 46703 | 702 |
+| BenchmarkCleanupExpire5kOf50k | 5967600 | 5463417 | 40060 |
+| BenchmarkEnsurePeerRotate | 43362 | 1376 | 25 |
+| BenchmarkEnsurePeerNew | 44031 | 1876 | 32 |
+| BenchmarkDeletePeer | 2823 | 736 | 12 |
 | BenchmarkPeerStoreSet | 34.10 | 0 | 0 |
 | BenchmarkPeerStoreGet | 22.87 | 0 | 0 |
 | BenchmarkPeerStoreGetParallel | 151.0 | 0 | 0 |
@@ -105,11 +105,11 @@ Values below use the median of 3 runs for readability.
 | Benchmark | ns/op (median) | B/op | allocs/op |
 |---|---:|---:|---:|
 | BenchmarkListPeersHandler | 5420 | 8443 | 17 |
-| BenchmarkCreatePeerHandler | 4634 | 8606 | 54 |
+| BenchmarkCreatePeerHandler | 5429 | 8372 | 51 |
 | BenchmarkGetPeerHandler | 920.0 | 1441 | 11 |
 | BenchmarkListPeersHandlerParallel | 3060 | 8521 | 17 |
 | BenchmarkGetPeerHandlerParallel | 574.6 | 1442 | 11 |
-| BenchmarkAPIKeyMiddleware | 191.5 | 224 | 5 |
+| BenchmarkAPIKeyMiddleware | 306.6 | 224 | 5 |
 
 ## Notes
 

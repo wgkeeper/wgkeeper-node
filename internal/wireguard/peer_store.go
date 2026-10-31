@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -143,6 +144,30 @@ func (s *PeerStore) Delete(peerID string) {
 	}
 	delete(s.peers, peerID)
 	s.removeSortedKey(peerSortKey{rec.PeerID, rec.CreatedAt})
+}
+
+// DeleteBatch removes several peers in one pass over the sorted index, so
+// expiring k of n peers costs O(n) instead of O(k·n).
+func (s *PeerStore) DeleteBatch(peerIDs ...string) {
+	if len(peerIDs) == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	drop := make(map[string]struct{}, len(peerIDs))
+	for _, id := range peerIDs {
+		if _, ok := s.peers[id]; ok {
+			drop[id] = struct{}{}
+			delete(s.peers, id)
+		}
+	}
+	if len(drop) == 0 {
+		return
+	}
+	s.sortedKeys = slices.DeleteFunc(s.sortedKeys, func(k peerSortKey) bool {
+		_, ok := drop[k.peerID]
+		return ok
+	})
 }
 
 // insertSorted inserts key into sortedKeys at the correct position.

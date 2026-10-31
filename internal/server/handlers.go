@@ -51,11 +51,12 @@ func healthHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, HealthResponse{Status: "ok"})
 }
 
-// readinessHandler checks whether core WireGuard dependencies are healthy enough to serve traffic.
-// Currently it treats successful Stats() call as readiness signal.
-func readinessHandler(wgService statsProvider) gin.HandlerFunc {
+// readinessHandler reports whether the WireGuard device can be read. It uses
+// the cached device read, not the full Stats computation, because health
+// checks call it every few seconds.
+func readinessHandler(wgService readinessProvider) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if _, err := wgService.Stats(); err != nil {
+		if err := wgService.Ready(); err != nil {
 			c.JSON(http.StatusServiceUnavailable, ReadinessResponse{
 				Status: "unhealthy",
 				Reason: "wireguard_unavailable",
@@ -82,8 +83,7 @@ func createPeerHandler(wgService wgPeerService, m *metrics.Metrics) gin.HandlerF
 	return func(c *gin.Context) {
 		var req peerRequest
 		if err := decodeStrictJSON(c.Request.Body, &req); err != nil {
-			var tooLarge *http.MaxBytesError
-			if errors.As(err, &tooLarge) {
+			if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 				writeError(c, http.StatusRequestEntityTooLarge, "request body too large", "body_too_large", nil)
 				return
 			}
@@ -202,10 +202,7 @@ func listPeersHandler(wgService wgPeersListProvider) gin.HandlerFunc {
 		hasNext := offset+len(list) < total
 		var prevOffset, nextOffset *int
 		if hasPrev {
-			prev := offset - limit
-			if prev < 0 {
-				prev = 0
-			}
+			prev := max(offset-limit, 0)
 			prevOffset = &prev
 		}
 		if hasNext {
@@ -314,6 +311,8 @@ func resultLabel(err error) string {
 		return metrics.ResultErrorUnsupportedFam
 	case errors.Is(err, wireguard.ErrPeerStore):
 		return metrics.ResultErrorPersist
+	case errors.Is(err, wireguard.ErrDevice):
+		return metrics.ResultErrorDevice
 	}
 	return metrics.ResultErrorInternal
 }
@@ -322,7 +321,7 @@ func resultLabel(err error) string {
 // If provided, must be in the future; otherwise returns error.
 func parseExpiresAt(s *string) (*time.Time, error) {
 	if s == nil || *s == "" {
-		return nil, nil
+		return nil, nil //nolint:nilnil // no expiry is a valid result, not an error
 	}
 	t, err := time.Parse(time.RFC3339, *s)
 	if err != nil {
@@ -369,8 +368,7 @@ func decodeStrictJSON(body io.Reader, v any) error {
 		return err
 	}
 	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			return err
 		}
 		return errors.New("unexpected data after the JSON object")
@@ -412,6 +410,10 @@ type wgPeerService interface {
 // statsProvider provides WireGuard stats (single-method interface naming).
 type statsProvider interface {
 	Stats() (wireguard.Stats, error)
+}
+
+type readinessProvider interface {
+	Ready() error
 }
 
 type wgPeersListProvider interface {

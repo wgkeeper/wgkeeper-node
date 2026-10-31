@@ -65,85 +65,6 @@ func TestEnsurePeerInvalidAddressFamily(t *testing.T) {
 
 // ---------- rotatePeer with IPv6 AllowedIPs ----------
 
-func TestRotatePeerIPv6Family(t *testing.T) {
-	_, subnet6, _ := net.ParseCIDR(testSubnet6)
-	key, _ := wgtypes.GenerateKey()
-	svc := &WireGuardService{
-		client:     fakeWGClient{device: &wgtypes.Device{}},
-		deviceName: "wg0",
-		subnet6:    subnet6,
-		serverIP6:  net.ParseIP(ipv6TestAddr1),
-		store:      NewPeerStore(),
-	}
-	svc.store.Set(PeerRecord{
-		PeerID:       "ipv6-peer",
-		PublicKey:    key,
-		PresharedKey: wgtypes.Key{},
-		AllowedIPs:   mustParseCIDRs(t, "fd00::2/128"),
-	})
-	info, err := svc.EnsurePeer("ipv6-peer", nil, nil)
-	if err != nil {
-		t.Fatalf("EnsurePeer IPv6 rotate: %v", err)
-	}
-	if len(info.AddressFamilies) != 1 || info.AddressFamilies[0] != FamilyIPv6 {
-		t.Errorf("expected [IPv6] families, got %v", info.AddressFamilies)
-	}
-}
-
-// ---------- ipv4Range with IPv6 subnet ----------
-
-func TestIpv4RangeIPv6Subnet(t *testing.T) {
-	_, subnet6, _ := net.ParseCIDR(testSubnet6)
-	_, _, err := ipv4Range(subnet6)
-	if err == nil {
-		t.Fatal("expected error when IPv6 subnet passed to ipv4Range")
-	}
-}
-
-// ---------- allocateOneIPv4 error via broken subnet ----------
-
-func TestAllocateIPsIPv4RangeError(t *testing.T) {
-	// /31 causes ipv4Range to fail inside allocateOneIPv4
-	_, subnet31, _ := net.ParseCIDR(testSubnet31)
-	svc := &WireGuardService{
-		client:     fakeWGClient{device: &wgtypes.Device{}},
-		deviceName: "wg0",
-		subnet4:    subnet31,
-		serverIP4:  net.ParseIP(ipServerTest),
-		store:      NewPeerStore(),
-	}
-	_, err := svc.allocateIPs([]string{FamilyIPv4})
-	if err == nil {
-		t.Fatal("expected error from allocateOneIPv4 for /31 subnet")
-	}
-}
-
-// ---------- allocateOneIPv6 with large subnet (ones < 112) ----------
-
-func TestAllocateOneIPv6LargeSubnet(t *testing.T) {
-	_, subnet, _ := net.ParseCIDR(subnet6TestCIDR64) // /64, ones=64 < 112
-	used := map[string]struct{}{}
-	ipNet, err := allocateOneIPv6(subnet, used, nil)
-	if err != nil {
-		t.Fatalf(msgUnexpectedError, err)
-	}
-	if ipNet.IP.To4() != nil {
-		t.Error("expected IPv6 address")
-	}
-}
-
-// ---------- possiblePeerCountIPv6 error ----------
-
-func TestPossiblePeerCountIPv6TooSmall(t *testing.T) {
-	_, subnet128, _ := net.ParseCIDR("fd00::1/128")
-	_, err := possiblePeerCountIPv6(subnet128, nil)
-	if err == nil {
-		t.Fatal("expected error for /128 IPv6 subnet")
-	}
-}
-
-// ---------- possiblePeerCountTotal IPv6 error ----------
-
 func TestPossiblePeerCountTotalSubnet6Error(t *testing.T) {
 	_, subnet128, _ := net.ParseCIDR("fd00::1/128")
 	svc := &WireGuardService{subnet6: subnet128, store: NewPeerStore()}
@@ -166,16 +87,6 @@ func TestResolveServerIP4EmptyServerIPBadSubnet(t *testing.T) {
 func TestSetupSubnet6InvalidCIDR(t *testing.T) {
 	if _, _, err := setupSubnet6("not-a-cidr", ""); err == nil {
 		t.Fatal("expected error for invalid CIDR in setupSubnet6")
-	}
-}
-
-func TestPossiblePeerCountTotalSubnet4Error(t *testing.T) {
-	// /31 subnet causes ipv4Range to fail ("too small")
-	_, subnet31, _ := net.ParseCIDR(testSubnet31)
-	svc := &WireGuardService{subnet4: subnet31, store: NewPeerStore()}
-	_, err := svc.possiblePeerCountTotal()
-	if err == nil {
-		t.Fatal("expected error for /31 subnet in possiblePeerCountTotal")
 	}
 }
 
@@ -359,95 +270,6 @@ func TestReconcileStoreWithDevicePresentPeerSkipped(t *testing.T) {
 
 	if err := svc.reconcileStoreWithDevice(); err != nil {
 		t.Fatalf("reconcileStoreWithDevice: %v", err)
-	}
-}
-
-func TestReconcileStoreWithDeviceDeviceError(t *testing.T) {
-	svc := &WireGuardService{
-		client:     fakeWGClient{err: errors.New("device offline")},
-		deviceName: "wg0",
-		store:      NewPeerStore(),
-	}
-	if svc.reconcileStoreWithDevice() == nil {
-		t.Fatal(msgExpectedDeviceUnavailable)
-	}
-}
-
-// ---------- possiblePeerCountIPv6 ----------
-
-func TestPossiblePeerCountIPv6LargeSubnet(t *testing.T) {
-	// /64 has way more than 65536 addresses → capped at maxIPv6PeersReported
-	_, subnet, _ := net.ParseCIDR(subnet6TestCIDR64)
-	n, err := possiblePeerCountIPv6(subnet, nil)
-	if err != nil {
-		t.Fatalf(msgUnexpectedError, err)
-	}
-	if n != maxIPv6PeersReported {
-		t.Errorf("expected cap of %d, got %d", maxIPv6PeersReported, n)
-	}
-}
-
-func TestPossiblePeerCountIPv6LargeSubnetServerIPInRange(t *testing.T) {
-	// server IP is inside the large subnet → count decremented by 1
-	_, subnet, _ := net.ParseCIDR(subnet6TestCIDR64)
-	serverIP := net.ParseIP(testServerIP6InBig)
-	n, err := possiblePeerCountIPv6(subnet, serverIP)
-	if err != nil {
-		t.Fatalf(msgUnexpectedError, err)
-	}
-	if n != maxIPv6PeersReported-1 {
-		t.Errorf("expected %d (server IP deducted), got %d", maxIPv6PeersReported-1, n)
-	}
-}
-
-func TestPossiblePeerCountIPv6LargeSubnetServerIPOutsideRange(t *testing.T) {
-	// server IP is outside the subnet → count stays at cap
-	_, subnet, _ := net.ParseCIDR(subnet6TestCIDR64)
-	serverIP := net.ParseIP(testServerIP6Out) // different prefix
-	n, err := possiblePeerCountIPv6(subnet, serverIP)
-	if err != nil {
-		t.Fatalf(msgUnexpectedError, err)
-	}
-	if n != maxIPv6PeersReported {
-		t.Errorf("expected cap of %d, got %d", maxIPv6PeersReported, n)
-	}
-}
-
-func TestPossiblePeerCountIPv6SmallSubnetWithServerIP(t *testing.T) {
-	// /120 (ones=120 ≥ 112) → iterates; server IP is excluded
-	_, subnet, _ := net.ParseCIDR(subnet6TestCIDR)
-	serverIP := net.ParseIP(ipv6TestAddr1)
-	n, err := possiblePeerCountIPv6(subnet, serverIP)
-	if err != nil {
-		t.Fatalf(msgUnexpectedError, err)
-	}
-	// /120 = 256 addresses, 2 reserved (start/end), server excluded → 253
-	withoutServer, _ := possiblePeerCountIPv6(subnet, nil)
-	if n != withoutServer-1 {
-		t.Errorf("expected server IP to reduce count by 1: without=%d with=%d", withoutServer, n)
-	}
-}
-
-// ---------- possiblePeerCountTotal ----------
-
-func TestPossiblePeerCountTotalDualStack(t *testing.T) {
-	_, subnet4, _ := net.ParseCIDR(subnetTestCIDR)
-	_, subnet6, _ := net.ParseCIDR(testSubnet6)
-	svc := &WireGuardService{
-		subnet4:   subnet4,
-		serverIP4: net.ParseIP(ipServerTest),
-		subnet6:   subnet6,
-		serverIP6: net.ParseIP(ipv6TestAddr1),
-		store:     NewPeerStore(),
-	}
-	n, err := svc.possiblePeerCountTotal()
-	if err != nil {
-		t.Fatalf(msgUnexpectedError, err)
-	}
-	v4, _ := possiblePeerCount(subnet4, net.ParseIP(ipServerTest))
-	v6, _ := possiblePeerCountIPv6(subnet6, net.ParseIP(ipv6TestAddr1))
-	if n != v4+v6 {
-		t.Errorf("expected %d+%d=%d, got %d", v4, v6, v4+v6, n)
 	}
 }
 
@@ -845,165 +667,6 @@ func TestResolveServerIP4IPv6Input(t *testing.T) {
 
 // ---------- NodeAddressFamilies ----------
 
-func TestNodeAddressFamiliesDualStack(t *testing.T) {
-	_, subnet4, _ := net.ParseCIDR(subnetTestCIDR)
-	_, subnet6, _ := net.ParseCIDR(testSubnet6)
-	svc := &WireGuardService{subnet4: subnet4, subnet6: subnet6}
-	families := svc.NodeAddressFamilies()
-	if len(families) != 2 {
-		t.Errorf(msgExpectedTwoFamilies, families)
-	}
-}
-
-// ---------- prevIPv6 ----------
-
-func TestPrevIPv6(t *testing.T) {
-	cases := []struct{ in, want string }{
-		{"fd00::5", "fd00::4"},
-		{"fd00::100", "fd00::ff"},
-		{ipv6TestAddr1, "fd00::"},
-	}
-	for _, tc := range cases {
-		got := prevIPv6(net.ParseIP(tc.in))
-		if got.String() != tc.want {
-			t.Errorf("prevIPv6(%s) = %s, want %s", tc.in, got, tc.want)
-		}
-	}
-}
-
-// ---------- ipv6SearchFrom ----------
-
-func TestIPv6SearchFromHintOutOfRange(t *testing.T) {
-	_, subnet, _ := net.ParseCIDR(subnet6TestCIDR) // fd00::/120
-	start, end, _ := ipv6Range(subnet)             // fd00::1 .. fd00::fe
-
-	// hint before start
-	h1 := net.ParseIP("fd00::").To16()
-	if from := ipv6SearchFrom(start, end, &h1); !from.Equal(start) {
-		t.Errorf("hint before start: expected start, got %s", from)
-	}
-	// hint after end
-	h2 := net.ParseIP("fd00::ff").To16()
-	if from := ipv6SearchFrom(start, end, &h2); !from.Equal(start) {
-		t.Errorf("hint after end: expected start, got %s", from)
-	}
-}
-
-func TestIPv6SearchFromHintAtEnd(t *testing.T) {
-	_, subnet, _ := net.ParseCIDR("fd00::/126") // fd00::1 .. fd00::2
-	start, end, _ := ipv6Range(subnet)
-
-	// hint = end: next overflows past end → searchFrom wraps to start
-	h := make(net.IP, 16)
-	copy(h, end)
-	from := ipv6SearchFrom(start, end, &h)
-	if !from.Equal(start) {
-		t.Errorf("hint at end: expected wrap to start, got %s", from)
-	}
-}
-
-// ---------- allocateOneIPv4 wrap-around ----------
-
-func TestAllocateOneIPv4WrapAround(t *testing.T) {
-	// /30: usable range 10.0.0.1 – 10.0.0.2 (2 IPs)
-	_, subnet, _ := net.ParseCIDR("10.0.0.0/30")
-	used := map[string]struct{}{"10.0.0.2": {}}
-	hint := ipToUint32(net.ParseIP(ipServerTest).To4()) // searchFrom = .2
-	ipNet, err := allocateOneIPv4(subnet, used, &hint)
-	if err != nil {
-		t.Fatalf(msgUnexpectedError, err)
-	}
-	if ipNet.IP.String() != ipServerTest {
-		t.Errorf("expected 10.0.0.1 (wrap-around), got %s", ipNet.IP)
-	}
-}
-
-// ---------- allocateOneIPv6 wrap-around (also exercises prevIPv6) ----------
-
-func TestAllocateOneIPv6WrapAround(t *testing.T) {
-	// fd00::/126: usable fd00::1 – fd00::2
-	_, subnet, _ := net.ParseCIDR("fd00::/126")
-	used := map[string]struct{}{"fd00::2": {}}
-	hint := net.ParseIP(ipv6TestAddr1).To16() // searchFrom = fd00::2
-	ipNet, err := allocateOneIPv6(subnet, used, &hint)
-	if err != nil {
-		t.Fatalf(msgUnexpectedError, err)
-	}
-	if ipNet.IP.String() != ipv6TestAddr1 {
-		t.Errorf("expected fd00::1 (wrap-around), got %s", ipNet.IP)
-	}
-}
-
-// ---------- large IPv4 subnet triggers maxIter cap ----------
-
-func TestAllocateOneIPv4LargeSubnetCap(t *testing.T) {
-	// /15 has 131070 usable IPs → triggers maxIter = maxIPv4Iter
-	_, subnet, _ := net.ParseCIDR("10.0.0.0/15")
-	used := make(map[string]struct{})
-	hint := uint32(0)
-	ipNet, err := allocateOneIPv4(subnet, used, &hint)
-	if err != nil {
-		t.Fatalf("unexpected error for large subnet: %v", err)
-	}
-	if ipNet.IP == nil {
-		t.Fatal("expected non-nil IP")
-	}
-}
-
-// ---------- scanIPv4Range / scanIPv6Range maxIter exceeded ----------
-
-func TestScanIPv4RangeMaxIterExceeded(t *testing.T) {
-	used := map[string]struct{}{}
-	n := 5
-	from := ipToUint32(net.ParseIP(ipServerTest).To4())
-	to := ipToUint32(net.ParseIP("10.0.0.10").To4())
-	if _, ok := scanIPv4Range(from, to, 5, &n, used, nil); ok {
-		t.Fatal("expected false when n already >= maxIter")
-	}
-}
-
-func TestScanIPv6RangeMaxIterExceeded(t *testing.T) {
-	used := map[string]struct{}{}
-	n := 5
-	from := net.ParseIP(ipv6TestAddr1).To16()
-	to := net.ParseIP("fd00::10").To16()
-	if _, ok := scanIPv6Range(from, to, 5, &n, used, nil); ok {
-		t.Fatal("expected false when n already >= maxIter")
-	}
-}
-
-// ---------- cleanup updates usedIPs ----------
-
-func TestCleanupExpiredPeerUpdatesUsedIPs(t *testing.T) {
-	_, subnet4, _ := net.ParseCIDR(subnetTestCIDR)
-	key, _ := wgtypes.GenerateKey()
-	expiredAt := time.Now().UTC().Add(-time.Hour)
-	svc := &WireGuardService{
-		client:     fakeWGClient{device: &wgtypes.Device{}},
-		deviceName: "wg0",
-		subnet4:    subnet4,
-		serverIP4:  net.ParseIP(ipServerTest),
-		store:      NewPeerStore(),
-	}
-	svc.initUsedIPs()
-	svc.store.Set(PeerRecord{
-		PeerID:     "expiring",
-		PublicKey:  key,
-		AllowedIPs: []net.IPNet{ipNet(t, ipPeerTest)},
-		CreatedAt:  time.Now().UTC(),
-		ExpiresAt:  &expiredAt,
-	})
-	svc.usedIPs[ipPeerTest] = struct{}{}
-
-	svc.cleanupExpiredPeers()
-
-	if _, ok := svc.usedIPs[ipPeerTest]; ok {
-		t.Error("expected IP to be removed from usedIPs after expiry cleanup")
-	}
-}
-
-// ---------- doCleanupBatch race guard ----------
-
 // TestCleanupBatchExtended verifies that doCleanupBatch skips a peer whose expiry
 // was extended between the ForEach snapshot and lock acquisition (simulated by
 // storing a future ExpiresAt before calling directly).
@@ -1130,7 +793,7 @@ func TestDeviceCacheHit(t *testing.T) {
 	client := &countingClient{dev: &wgtypes.Device{ListenPort: 51820}}
 	svc := newSvcWithCache(client, time.Second)
 
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		if _, err := svc.cachedDevice(); err != nil {
 			t.Fatalf("call %d: unexpected error: %v", i, err)
 		}
@@ -1227,7 +890,6 @@ func TestCleanupBatchConfigureDeviceError(t *testing.T) {
 		client:     fakeWGClient{device: &wgtypes.Device{}, configureErr: errors.New(testErrDeviceBusyMessage)},
 		deviceName: "wg0",
 		store:      NewPeerStore(),
-		usedIPs:    make(map[string]struct{}),
 	}
 	svc.store.Set(PeerRecord{
 		PeerID:       "expired",
@@ -1260,7 +922,6 @@ func TestCleanupExpiredPeersLogsBatchError(t *testing.T) {
 		client:     fakeWGClient{device: &wgtypes.Device{}, configureErr: errors.New(testErrDeviceBusyMessage)},
 		deviceName: "wg0",
 		store:      NewPeerStore(),
-		usedIPs:    make(map[string]struct{}),
 	}
 	svc.store.Set(PeerRecord{
 		PeerID:       "expired",

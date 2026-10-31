@@ -40,30 +40,32 @@ func main() {
 	debug := isDebugEnabled()
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel(debug)})))
 	setupGinMode(debug)
-
-	cfg, err := config.LoadConfig()
-	if err != nil {
-		slog.Error("load config", "error", err)
+	if err := run(os.Args); err != nil {
+		slog.Error("wgkeeper-node stopped", "error", err)
 		os.Exit(1)
 	}
+}
 
-	if handled, err := handleInit(cfg, os.Args); handled {
-		if err != nil {
-			slog.Error(err.Error())
-			os.Exit(1)
-		}
-		return
+// run starts the node and blocks until a shutdown signal or a fatal server
+// error. Keeping it separate from main means every deferred cleanup (closing
+// the peer store, stopping background work) runs before the process exits.
+func run(args []string) error {
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	if handled, err := handleInit(cfg, args); handled {
+		return err
 	}
 
 	if _, err := wireguard.EnsureWireGuardConfig(cfg); err != nil {
-		slog.Error("ensure WireGuard config", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("ensure WireGuard config: %w", err)
 	}
 
 	wgService, err := wireguard.NewWireGuardService(cfg)
 	if err != nil {
-		slog.Error("init WireGuard", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("init WireGuard: %w", err)
 	}
 	defer func() {
 		if err := wgService.Close(); err != nil {
@@ -113,11 +115,11 @@ func main() {
 	shutdownSignal := make(chan os.Signal, 1)
 	signal.Notify(shutdownSignal, syscall.SIGINT, syscall.SIGTERM)
 
+	var fatal error
 	select {
 	case err := <-serverErr:
 		if isFatalServerError(err) {
-			slog.Error("server error", "error", err)
-			os.Exit(1)
+			fatal = fmt.Errorf("server error: %w", err)
 		}
 	case sig := <-shutdownSignal:
 		slog.Info("shutdown signal received", "signal", sig)
@@ -139,6 +141,7 @@ func main() {
 	}
 	// metrics.Run reacts to appCancel and shuts down its own server with a 5s budget.
 	<-metricsDone
+	return fatal
 }
 
 // peerSnapshotAdapter bridges WireGuardService.Stats() to metrics.PeersProvider

@@ -44,7 +44,7 @@ func assertStatus(t *testing.T, rec *httptest.ResponseRecorder, want int) {
 
 func assertJSONErrorCode(t *testing.T, body []byte, wantCode string) {
 	t.Helper()
-	var payload map[string]interface{}
+	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
 		t.Fatalf(msgInvalidJSON, err)
 	}
@@ -54,6 +54,7 @@ func assertJSONErrorCode(t *testing.T, body []byte, wantCode string) {
 }
 
 type mockWGService struct {
+	readyErr       error
 	statsFunc      func() (wireguard.Stats, error)
 	ensurePeerFunc func(peerID string, expiresAt *time.Time, addressFamilies []string) (wireguard.PeerInfo, error)
 	deletePeerFunc func(string) ([]string, error)
@@ -64,6 +65,10 @@ type mockWGService struct {
 
 func (m mockWGService) Stats() (wireguard.Stats, error) {
 	return m.statsFunc()
+}
+
+func (m mockWGService) Ready() error {
+	return m.readyErr
 }
 
 func (m mockWGService) EnsurePeer(peerID string, expiresAt *time.Time, addressFamilies []string) (wireguard.PeerInfo, error) {
@@ -103,7 +108,7 @@ func TestHealthHandler(t *testing.T) {
 	router.GET("/healthz", healthHandler)
 	rec := performRequest(t, router, http.MethodGet, "/healthz", nil, "")
 	assertStatus(t, rec, http.StatusOK)
-	var payload map[string]interface{}
+	var payload map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 		t.Fatalf(msgInvalidJSON, err)
 	}
@@ -114,15 +119,11 @@ func TestHealthHandler(t *testing.T) {
 
 func TestReadinessHandlerHealthy(t *testing.T) {
 	router := newTestRouter()
-	router.GET(pathReadyz, readinessHandler(mockWGService{
-		statsFunc: func() (wireguard.Stats, error) {
-			return wireguard.Stats{}, nil
-		},
-	}))
+	router.GET(pathReadyz, readinessHandler(mockWGService{}))
 
 	rec := performRequest(t, router, http.MethodGet, pathReadyz, nil, "")
 	assertStatus(t, rec, http.StatusOK)
-	var payload map[string]interface{}
+	var payload map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 		t.Fatalf(msgInvalidJSON, err)
 	}
@@ -133,15 +134,11 @@ func TestReadinessHandlerHealthy(t *testing.T) {
 
 func TestReadinessHandlerUnhealthy(t *testing.T) {
 	router := newTestRouter()
-	router.GET(pathReadyz, readinessHandler(mockWGService{
-		statsFunc: func() (wireguard.Stats, error) {
-			return wireguard.Stats{}, errors.New("wireguard down")
-		},
-	}))
+	router.GET(pathReadyz, readinessHandler(mockWGService{readyErr: errors.New("wireguard down")}))
 
 	rec := performRequest(t, router, http.MethodGet, pathReadyz, nil, "")
 	assertStatus(t, rec, http.StatusServiceUnavailable)
-	var payload map[string]interface{}
+	var payload map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 		t.Fatalf(msgInvalidJSON, err)
 	}
@@ -439,7 +436,7 @@ func TestStatsHandlerErrorHidesDetail(t *testing.T) {
 
 	rec := performRequest(t, router, http.MethodGet, pathStats, nil, testAPIKey)
 	assertStatus(t, rec, http.StatusInternalServerError)
-	var payload map[string]interface{}
+	var payload map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 		t.Fatalf(msgInvalidJSON, err)
 	}
@@ -522,7 +519,7 @@ func TestGetPeerSuccess(t *testing.T) {
 	router.GET(pathPeersPeerID, apiKeyMiddleware(testAPIKey), getPeerHandler(mockWGService{
 		getPeerFunc: func(peerID string) (*wireguard.PeerDetail, error) {
 			return &wireguard.PeerDetail{
-				PeerListItem:  wireguard.PeerListItem{PeerID: peerID, AllowedIPs: []string{testAllowedIP}, AddressFamilies: []string{"IPv4"}, PublicKey: "pk", Active: true, CreatedAt: "2025-01-01T00:00:00Z"},
+				PeerID: peerID, AllowedIPs: []string{testAllowedIP}, AddressFamilies: []string{"IPv4"}, PublicKey: "pk", Active: true, CreatedAt: "2025-01-01T00:00:00Z",
 				ReceiveBytes:  1000,
 				TransmitBytes: 2000,
 			}, nil
@@ -580,7 +577,7 @@ func makePeerList(n int) []wireguard.PeerListItem {
 	return peers
 }
 
-func listPeersWithPagination(t *testing.T, peers []wireguard.PeerListItem, query string) (list []interface{}, total float64, meta map[string]interface{}) {
+func listPeersWithPagination(t *testing.T, peers []wireguard.PeerListItem, query string) (list []any, total float64, meta map[string]any) {
 	t.Helper()
 	router := newTestRouter()
 	router.GET(pathPeers, apiKeyMiddleware(testAPIKey), listPeersHandler(mockWGService{
@@ -599,12 +596,12 @@ func listPeersWithPagination(t *testing.T, peers []wireguard.PeerListItem, query
 
 	rec := performRequest(t, router, http.MethodGet, pathPeers+query, nil, testAPIKey)
 	assertStatus(t, rec, http.StatusOK)
-	var payload map[string]interface{}
+	var payload map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
 		t.Fatalf(msgInvalidJSON, err)
 	}
-	rawPeers, _ := payload["data"].([]interface{})
-	meta, _ = payload["meta"].(map[string]interface{})
+	rawPeers, _ := payload["data"].([]any)
+	meta, _ = payload["meta"].(map[string]any)
 	if meta != nil {
 		if v, ok := meta["totalItems"].(float64); ok {
 			total = v
@@ -748,5 +745,12 @@ func TestListPeersDefaultLimitAppliedWhenAbsent(t *testing.T) {
 	_, _, meta := listPeersWithPagination(t, peers, "")
 	if limit, _ := meta["limit"].(float64); limit != defaultPaginationLimit {
 		t.Errorf("expected default limit=%d when ?limit absent, got %v", defaultPaginationLimit, limit)
+	}
+}
+
+func TestResultLabelDeviceSentinel(t *testing.T) {
+	err := fmt.Errorf("%w: %w", wireguard.ErrDevice, errors.New("netlink busy"))
+	if got := resultLabel(err); got != metrics.ResultErrorDevice {
+		t.Errorf("resultLabel = %q, want %q", got, metrics.ResultErrorDevice)
 	}
 }

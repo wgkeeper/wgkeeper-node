@@ -109,15 +109,13 @@ func BenchmarkCreatePeerHandler(b *testing.B) {
 
 func BenchmarkGetPeerHandler(b *testing.B) {
 	detail := &wireguard.PeerDetail{
-		PeerListItem: wireguard.PeerListItem{
-			PeerID:          benchPeerID,
-			AllowedIPs:      []string{benchAllowedIP},
-			AddressFamilies: []string{"IPv4"},
-			PublicKey:       "pk",
-			CreatedAt:       time.Now().UTC().Format(time.RFC3339),
-		},
-		ReceiveBytes:  1024,
-		TransmitBytes: 2048,
+		PeerID:          benchPeerID,
+		AllowedIPs:      []string{benchAllowedIP},
+		AddressFamilies: []string{"IPv4"},
+		PublicKey:       "pk",
+		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
+		ReceiveBytes:    1024,
+		TransmitBytes:   2048,
 	}
 	svc := mockWGService{
 		getPeerFunc: func(_ string) (*wireguard.PeerDetail, error) { return detail, nil },
@@ -172,15 +170,13 @@ func BenchmarkListPeersHandlerParallel(b *testing.B) {
 
 func BenchmarkGetPeerHandlerParallel(b *testing.B) {
 	detail := &wireguard.PeerDetail{
-		PeerListItem: wireguard.PeerListItem{
-			PeerID:          benchPeerID,
-			AllowedIPs:      []string{benchAllowedIP},
-			AddressFamilies: []string{"IPv4"},
-			PublicKey:       "pk",
-			CreatedAt:       time.Now().UTC().Format(time.RFC3339),
-		},
-		ReceiveBytes:  1024,
-		TransmitBytes: 2048,
+		PeerID:          benchPeerID,
+		AllowedIPs:      []string{benchAllowedIP},
+		AddressFamilies: []string{"IPv4"},
+		PublicKey:       "pk",
+		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
+		ReceiveBytes:    1024,
+		TransmitBytes:   2048,
 	}
 	svc := mockWGService{
 		getPeerFunc: func(_ string) (*wireguard.PeerDetail, error) { return detail, nil },

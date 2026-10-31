@@ -15,6 +15,10 @@ linters:
     - unconvert
     - misspell
     - unparam
+    - modernize
+    - gocritic
+    - usetesting
+    - nilnil
 
   settings:
     errcheck:
@@ -29,6 +33,7 @@ linters:
           - errcheck
           - gosec
           - noctx
+          - nilnil
 
 formatters:
   enable:

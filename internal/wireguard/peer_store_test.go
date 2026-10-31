@@ -28,7 +28,7 @@ const (
 func makeStorePeers(t *testing.T, store *PeerStore, n int) {
 	t.Helper()
 	base := time.Now().UTC()
-	for i := 0; i < n; i++ {
+	for i := range n {
 		key, _ := wgtypes.GenerateKey()
 		psk, _ := wgtypes.GenerateKey()
 		store.Set(PeerRecord{
@@ -334,7 +334,7 @@ func TestPeerStoreConcurrentAccess(t *testing.T) {
 		AllowedIPs:   mustParseCIDRs(t, testAllowedIP),
 	}
 	var wg sync.WaitGroup
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		wg.Add(3)
 		go func() { defer wg.Done(); store.Set(rec) }()
 		go func() { defer wg.Done(); store.Get(peerIDTest) }()

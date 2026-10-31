@@ -45,11 +45,23 @@ The node refuses to start if the config still contains a removed key (`server.tl
 
 ### Fixed
 
+- Creating a peer could fail with `409 no_available_ip` on subnets larger than a `/16` (IPv4) or `/112` (IPv6) while free addresses were left: the allocator gave up after 65,536 candidates. Peer addresses now come from a pool that hands out the lowest freed address first, then the next unused one, with no scan limit.
+- Expired peers are counted in `wgkeeper_peer_operations_total{op="expire"}`, and failed device changes in `result="error_device"` instead of `error_internal`.
 - **Breaking:** the node no longer deletes stored peers that fall outside the configured subnets. A subnet typo used to wipe every peer on the next restart; now startup fails with an error and nothing is deleted. Startup also fails when a stored peer holds the server address or shares an address with another peer.
 - Deleting a peer and expiring peers are now write-ahead under the service lock, like create and rotate. Before, the bbolt delete ran after the lock was released: a concurrent create of the same peer could have its new record deleted, and a failed bbolt write could bring a revoked peer back on restart.
 - Rotating a peer whose expiry has passed without a new `expiresAt` returns `409 peer_expired` instead of `200` followed by deletion within a minute.
 - Shutdown stops the HTTP server before the cleanup loop and the peer store, and a write after the store is closed returns an error instead of silently doing nothing. The compose files set `stop_grace_period: 30s` so Docker doesn't kill the node mid-shutdown.
 - A configured `peer_store_file` that did not exist yet was never created, so nothing was persisted until the file was created by hand.
+
+### Performance
+
+Measured with 50,000 peers:
+
+- `GET /peers` builds its device peer index once per device snapshot instead of on every page: 0.03 ms and 47 KB per page instead of 4.4 ms and 14 MB.
+- The expiry cleanup removes peers from the sorted index in one pass: 6 ms instead of 110 ms to expire 5,000 peers, and the service lock is held that much shorter.
+- Creating a peer after a delete no longer rescans every used address: about 140 ns instead of 2 ms.
+- The subnet capacity is computed once at startup instead of on every `/stats`, `/readyz` and metrics scrape (1.5 ms and 1 MB each for an IPv6 `/112`). For subnets larger than 2^53 addresses `/stats` now reports 2^53 instead of 65,536.
+- `/readyz` only checks that the WireGuard device can be read, the server key and port are read once, and the device snapshot is reused for 5 s instead of 1 s.
 
 ### Security
 

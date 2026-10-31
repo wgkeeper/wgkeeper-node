@@ -2,15 +2,16 @@ package wireguard
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wgkeeper/wgkeeper-node/internal/config"
@@ -37,6 +38,8 @@ var (
 	ErrInvalidAddressFamily = errors.New("invalid address family")
 	// ErrPeerStore wraps failures to write the bbolt peer store.
 	ErrPeerStore = errors.New("save peer store")
+	// ErrDevice wraps failures to change the WireGuard device.
+	ErrDevice = errors.New("configure wireguard device")
 	// ErrPeerExpired is returned when rotating a peer whose expiry has passed
 	// without giving it a new one: the rotation would succeed and the cleanup
 	// loop would delete the peer moments later.
@@ -84,6 +87,8 @@ type RollbackObserver interface {
 	// holds a record that startup reconcile will install on the device next
 	// run. This is the alert-the-on-call path.
 	OnPersistRollbackFailed()
+	// OnPeersExpired fires after the cleanup loop removed n expired peers.
+	OnPeersExpired(n int)
 }
 
 const (
@@ -107,20 +112,18 @@ type WireGuardService struct {
 	rollbackObs RollbackObserver
 	// mu serializes operations that modify WireGuard device and peer store together
 	mu sync.Mutex
-	// lastAllocated4/6 are ring-buffer hints for IP allocation: the next search
-	// starts after the last successfully allocated address instead of rescanning
-	// from the subnet start on every call. Accessed only under mu.
-	lastAllocated4 uint32
-	lastAllocated6 net.IP
-	// usedIPs is an incremental cache of all IP addresses currently assigned to
-	// peers (AllowedIPs) plus server IPs. It mirrors the store exactly and is
-	// updated on every peer add/delete so that allocateIPs runs in O(1) instead
-	// of O(N) on every call. Accessed only under mu.
-	usedIPs map[string]struct{}
+	// pool4/pool6 track which peer addresses are taken and hand out free ones.
+	// They mirror the store plus the server addresses. nil when the family is
+	// not configured. Accessed only under mu.
+	pool4 *ipPool
+	pool6 *ipPool
 	// devCache caches the result of client.Device for a short TTL so that
 	// concurrent read operations (Stats, ListPeers, GetPeer, ServerInfo) share
 	// a single kernel round-trip instead of each issuing their own netlink call.
 	devCache *deviceCache
+	// serverInfo caches the server public key and listen port after the first
+	// successful device read; see ServerInfo.
+	serverInfo atomic.Pointer[serverInfo]
 	// deviceOpTimeout overrides wgOpTimeout for device read operations.
 	// Zero means use wgOpTimeout. Exposed for tests only.
 	deviceOpTimeout time.Duration
@@ -239,7 +242,9 @@ func NewWireGuardService(cfg config.Config) (*WireGuardService, error) {
 	if err := initPersistStore(svc); err != nil {
 		return nil, errors.Join(err, svc.store.Close())
 	}
-	svc.initUsedIPs()
+	if err := svc.initPools(); err != nil {
+		return nil, errors.Join(err, svc.store.Close())
+	}
 	return svc, nil
 }
 
@@ -351,7 +356,7 @@ func (s *WireGuardService) reconcileStoreWithDevice() error {
 			})
 		}
 	}
-	peers := append(toAdd, toRemove...)
+	peers := slices.Concat(toAdd, toRemove)
 	if len(peers) == 0 {
 		return nil
 	}
@@ -445,13 +450,20 @@ func (s *WireGuardService) configureDevice(cfg wgtypes.Config) error {
 	go func() { done <- s.client.ConfigureDevice(s.deviceName, cfg) }()
 	select {
 	case err := <-done:
-		return err
+		if err != nil {
+			return fmt.Errorf("%w: %w", ErrDevice, err)
+		}
+		return nil
 	case <-ctx.Done():
-		return fmt.Errorf("configure wireguard device: %w", ctx.Err())
+		return fmt.Errorf("%w: %w", ErrDevice, ctx.Err())
 	}
 }
 
-const deviceCacheTTL = time.Second
+// deviceCacheTTL is how long a device snapshot is reused. Only handshake times
+// and traffic counters go stale within it; peer membership is read from the
+// store. Callers poll every few seconds at most (/readyz, scrapes), so a
+// shorter TTL would just mean a full netlink dump per call.
+const deviceCacheTTL = 5 * time.Second
 
 // deviceCache holds a short-lived snapshot of the WireGuard device state.
 // Multiple concurrent read operations (Stats, ListPeers, GetPeer, ServerInfo)
@@ -459,9 +471,33 @@ const deviceCacheTTL = time.Second
 // netlink call.
 type deviceCache struct {
 	mu        sync.Mutex
-	dev       *wgtypes.Device
+	snap      *deviceSnapshot
 	fetchedAt time.Time
 	ttl       time.Duration
+}
+
+// deviceSnapshot is one device read plus a peer index built on first use, so
+// looking up a peer by key is O(1) and the index is built once per snapshot
+// rather than once per request.
+type deviceSnapshot struct {
+	dev   *wgtypes.Device
+	once  sync.Once
+	byKey map[wgtypes.Key]int
+}
+
+// peer returns the device peer with the given public key.
+func (d *deviceSnapshot) peer(key wgtypes.Key) (wgtypes.Peer, bool) {
+	d.once.Do(func() {
+		d.byKey = make(map[wgtypes.Key]int, len(d.dev.Peers))
+		for i := range d.dev.Peers {
+			d.byKey[d.dev.Peers[i].PublicKey] = i
+		}
+	})
+	i, ok := d.byKey[key]
+	if !ok {
+		return wgtypes.Peer{}, false
+	}
+	return d.dev.Peers[i], true
 }
 
 func newDeviceCache(ttl time.Duration) *deviceCache {
@@ -470,19 +506,19 @@ func newDeviceCache(ttl time.Duration) *deviceCache {
 
 // get returns a cached device snapshot, or fetches a fresh one via fetch when
 // the cache is empty or stale.
-func (c *deviceCache) get(fetch func() (*wgtypes.Device, error)) (*wgtypes.Device, error) {
+func (c *deviceCache) get(fetch func() (*wgtypes.Device, error)) (*deviceSnapshot, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.dev != nil && time.Since(c.fetchedAt) < c.ttl {
-		return c.dev, nil
+	if c.snap != nil && time.Since(c.fetchedAt) < c.ttl {
+		return c.snap, nil
 	}
 	dev, err := fetch()
 	if err != nil {
 		return nil, err
 	}
-	c.dev = dev
+	c.snap = &deviceSnapshot{dev: dev}
 	c.fetchedAt = time.Now()
-	return dev, nil
+	return c.snap, nil
 }
 
 // deviceWithTimeout wraps client.Device with a hard timeout so that a hung
@@ -518,12 +554,23 @@ func (s *WireGuardService) deviceWithTimeout() (*wgtypes.Device, error) {
 // fresh one from the kernel when the cache has expired. Falls back to a direct
 // call when devCache is nil (e.g. in tests that construct the service manually).
 func (s *WireGuardService) cachedDevice() (*wgtypes.Device, error) {
-	if s.devCache == nil {
-		return s.deviceWithTimeout()
+	snap, err := s.cachedSnapshot()
+	if err != nil {
+		return nil, err
 	}
-	return s.devCache.get(func() (*wgtypes.Device, error) {
-		return s.deviceWithTimeout()
-	})
+	return snap.dev, nil
+}
+
+// cachedSnapshot is cachedDevice with the per-snapshot peer index.
+func (s *WireGuardService) cachedSnapshot() (*deviceSnapshot, error) {
+	if s.devCache == nil {
+		dev, err := s.deviceWithTimeout()
+		if err != nil {
+			return nil, err
+		}
+		return &deviceSnapshot{dev: dev}, nil
+	}
+	return s.devCache.get(s.deviceWithTimeout)
 }
 
 // NodeAddressFamilies returns the address families this node supports (e.g. ["IPv4", "IPv6"]).
@@ -669,21 +716,44 @@ func (s *WireGuardService) createPeer(peerID string, expiresAt *time.Time, addre
 	}, nil
 }
 
-// releaseAllocatedIPs frees IPs from the usedIPs cache after a failed allocation
-// attempt. Must be called with s.mu held.
+// releaseAllocatedIPs returns addresses to their pool. Must be called with s.mu held.
 func (s *WireGuardService) releaseAllocatedIPs(ips []net.IPNet) {
 	for _, aip := range ips {
-		delete(s.usedIPs, aip.IP.String())
-		s.retractAllocHint(aip.IP)
+		a := addrFromIP(aip.IP)
+		if a.Is4() && s.pool4 != nil {
+			s.pool4.release(a)
+		} else if a.Is6() && s.pool6 != nil {
+			s.pool6.release(a)
+		}
 	}
 }
 
+// ServerInfo returns the server's public key and listen port. Both are fixed
+// for the life of the process (wg0.conf is written once at startup), so the
+// first successful read is kept and peer creation never waits on a device dump.
 func (s *WireGuardService) ServerInfo() (string, int, error) {
+	if info := s.serverInfo.Load(); info != nil {
+		return info.publicKey, info.listenPort, nil
+	}
 	device, err := s.cachedDevice()
 	if err != nil {
 		return "", 0, err
 	}
-	return device.PublicKey.String(), device.ListenPort, nil
+	info := &serverInfo{publicKey: device.PublicKey.String(), listenPort: device.ListenPort}
+	s.serverInfo.Store(info)
+	return info.publicKey, info.listenPort, nil
+}
+
+type serverInfo struct {
+	publicKey  string
+	listenPort int
+}
+
+// Ready reports whether the WireGuard device can be read. It backs /readyz
+// and only needs the (cached) device, not the full Stats computation.
+func (s *WireGuardService) Ready() error {
+	_, err := s.cachedSnapshot()
+	return err
 }
 
 // DeletePeer removes a peer and returns the AllowedIPs that were freed (for
@@ -724,31 +794,7 @@ func (s *WireGuardService) DeletePeer(peerID string) ([]string, error) {
 // from the in-memory store and frees its addresses. Must be called with s.mu held.
 func (s *WireGuardService) forgetPeerLocked(record PeerRecord) {
 	s.store.Delete(record.PeerID)
-	for _, aip := range record.AllowedIPs {
-		delete(s.usedIPs, aip.IP.String())
-		s.retractAllocHint(aip.IP)
-	}
-}
-
-// retractAllocHint rolls back the ring-buffer allocation hint when an IP is
-// freed. Without this, the allocator always advances forward and skips
-// recently-freed addresses until a full wrap-around of the subnet.
-func (s *WireGuardService) retractAllocHint(ip net.IP) {
-	if ip4 := ip.To4(); ip4 != nil {
-		freed := ipToUint32(ip4)
-		if freed <= s.lastAllocated4 && freed > 0 {
-			s.lastAllocated4 = freed - 1
-		}
-		return
-	}
-	ip16 := ip.To16()
-	if ip16 == nil || s.lastAllocated6 == nil {
-		return
-	}
-	// Retract if freed ≤ lastAllocated6 (i.e. lastAllocated6 is not before freed).
-	if !ipAfterIPv6(ip16, s.lastAllocated6) {
-		s.lastAllocated6 = prevIPv6(ip16)
-	}
+	s.releaseAllocatedIPs(record.AllowedIPs)
 }
 
 func (s *WireGuardService) Stats() (Stats, error) {
@@ -807,20 +853,16 @@ func (s *WireGuardService) Stats() (Stats, error) {
 }
 
 func (s *WireGuardService) ListPeers(offset, limit int) ([]PeerListItem, int, error) {
-	device, err := s.cachedDevice()
+	snap, err := s.cachedSnapshot()
 	if err != nil {
 		return nil, 0, err
 	}
-	devicePeerByKey := make(map[wgtypes.Key]wgtypes.Peer)
-	for _, p := range device.Peers {
-		devicePeerByKey[p.PublicKey] = p
-	}
-
 	records, total := s.store.ListPaginated(offset, limit)
 	now := time.Now()
 	list := make([]PeerListItem, len(records))
 	for i, rec := range records {
-		list[i] = peerRecordToListItem(rec, devicePeerByKey[rec.PublicKey], now)
+		devicePeer, _ := snap.peer(rec.PublicKey)
+		list[i] = peerRecordToListItem(rec, devicePeer, now)
 	}
 	return list, total, nil
 }
@@ -830,17 +872,11 @@ func (s *WireGuardService) GetPeer(peerID string) (*PeerDetail, error) {
 	if !ok {
 		return nil, ErrPeerNotFound
 	}
-	device, err := s.cachedDevice()
+	snap, err := s.cachedSnapshot()
 	if err != nil {
 		return nil, err
 	}
-	var devicePeer wgtypes.Peer
-	for i := range device.Peers {
-		if device.Peers[i].PublicKey == record.PublicKey {
-			devicePeer = device.Peers[i]
-			break
-		}
-	}
+	devicePeer, _ := snap.peer(record.PublicKey)
 	now := time.Now()
 	item := peerRecordToListItem(record, devicePeer, now)
 	detail := &PeerDetail{
@@ -990,48 +1026,71 @@ func (s *WireGuardService) rotatePeer(peerID string, record PeerRecord, expiresA
 	}, nil
 }
 
-// initUsedIPs builds the usedIPs cache from the current store and server IPs.
-// Must be called after the store is loaded. Not concurrency-safe; call before
-// the service starts handling requests.
-func (s *WireGuardService) initUsedIPs() {
-	s.usedIPs = make(map[string]struct{})
-	if s.serverIP4 != nil {
-		s.usedIPs[s.serverIP4.String()] = struct{}{}
+// initPools builds the address pools from the subnets, the server addresses
+// and the stored peers. Call before the service handles requests.
+func (s *WireGuardService) initPools() error {
+	s.pool4, s.pool6 = nil, nil
+	if s.subnet4 != nil {
+		p, err := newPoolForSubnet(s.subnet4, s.serverIP4)
+		if err != nil {
+			return fmt.Errorf("wireguard.subnet: %w", err)
+		}
+		s.pool4 = p
 	}
-	if s.serverIP6 != nil {
-		s.usedIPs[s.serverIP6.String()] = struct{}{}
+	if s.subnet6 != nil {
+		p, err := newPoolForSubnet(s.subnet6, s.serverIP6)
+		if err != nil {
+			return fmt.Errorf("wireguard.subnet6: %w", err)
+		}
+		s.pool6 = p
 	}
 	s.store.ForEach(func(rec PeerRecord) {
 		for _, aip := range rec.AllowedIPs {
-			s.usedIPs[aip.IP.String()] = struct{}{}
+			a := addrFromIP(aip.IP)
+			if a.Is4() && s.pool4 != nil {
+				s.pool4.markUsed(a)
+			} else if a.Is6() && s.pool6 != nil {
+				s.pool6.markUsed(a)
+			}
 		}
 	})
+	return nil
 }
 
-// allocateIPs allocates one address per requested family. families must be validated (e.g. via ValidateAddressFamilies).
+func newPoolForSubnet(subnet *net.IPNet, server net.IP) (*ipPool, error) {
+	prefix, err := prefixFromIPNet(subnet)
+	if err != nil {
+		return nil, err
+	}
+	return newIPPool(prefix, addrFromIP(server))
+}
+
+// allocateIPs allocates one address per requested family. families must be
+// validated (e.g. via ValidateAddressFamilies). Must be called with s.mu held.
 func (s *WireGuardService) allocateIPs(families []string) ([]net.IPNet, error) {
-	if s.usedIPs == nil {
-		s.initUsedIPs()
+	if s.pool4 == nil && s.pool6 == nil {
+		if err := s.initPools(); err != nil {
+			return nil, err
+		}
 	}
 	wantIPv4, wantIPv6 := familiesRequested(families)
 	var out []net.IPNet
-	if wantIPv4 && s.subnet4 != nil {
-		ipNet, err := allocateOneIPv4(s.subnet4, s.usedIPs, &s.lastAllocated4)
+	if wantIPv4 && s.pool4 != nil {
+		a, err := s.pool4.allocate()
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, ipNet)
+		out = append(out, hostIPNet(a))
 	}
-	if wantIPv6 && s.subnet6 != nil {
-		ipNet, err := allocateOneIPv6(s.subnet6, s.usedIPs, &s.lastAllocated6)
+	if wantIPv6 && s.pool6 != nil {
+		a, err := s.pool6.allocate()
 		if err != nil {
-			// Release any address already reserved for an earlier family so a
-			// partially-successful dual-stack allocation does not leak an IPv4
-			// into usedIPs when the IPv6 pool is exhausted.
+			// Return the IPv4 address reserved above so a dual-stack request
+			// that fails on IPv6 doesn't leak it.
 			s.releaseAllocatedIPs(out)
 			return nil, err
 		}
-		out = append(out, ipNet)
+		out = append(out, hostIPNet(a))
 	}
 	return out, nil
 }
@@ -1048,285 +1107,43 @@ func familiesRequested(families []string) (wantIPv4, wantIPv6 bool) {
 	return wantIPv4, wantIPv6
 }
 
-// allocateOneIPv4 finds the next free IPv4 address in subnet.
-// hint, when non-nil, is a ring-buffer cursor: the search starts from *hint+1
-// and wraps around to the subnet start if needed, so sequential allocations are
-// O(1) instead of O(used) when starting from the subnet beginning every time.
-// On success *hint is updated to the allocated address. nil hint disables this.
-func allocateOneIPv4(subnet *net.IPNet, used map[string]struct{}, hint *uint32) (net.IPNet, error) {
-	start, end, err := ipv4Range(subnet)
-	if err != nil {
-		return net.IPNet{}, err
-	}
-	startInt := ipToUint32(start)
-	endInt := ipToUint32(end)
-
-	// For subnets larger than maxIPv4Iter, cap the scan to avoid O(n) worst-case
-	// on a nearly-full subnet (mirrors the maxIter guard in allocateOneIPv6).
-	maxIter := 0
-	if endInt-startInt+1 > maxIPv4Iter {
-		maxIter = maxIPv4Iter
-	}
-
-	searchFrom := startInt
-	if hint != nil && *hint >= startInt && *hint < endInt {
-		searchFrom = *hint + 1
-	}
-
-	n := 0
-	// First pass: searchFrom → end. Wrap-around pass: start → searchFrom−1.
-	if ip, ok := scanIPv4Range(searchFrom, endInt, maxIter, &n, used, hint); ok {
-		return ip, nil
-	}
-	if searchFrom > startInt {
-		if ip, ok := scanIPv4Range(startInt, searchFrom-1, maxIter, &n, used, hint); ok {
-			return ip, nil
-		}
-	}
-	return net.IPNet{}, ErrNoAvailableIP
-}
-
-// scanIPv4Range scans [from, to] for the first free IPv4 address.
-// n is a shared iteration counter; maxIter > 0 caps total iterations across passes.
-func scanIPv4Range(from, to uint32, maxIter int, n *int, used map[string]struct{}, hint *uint32) (net.IPNet, bool) {
-	for candidate := from; candidate <= to; candidate++ {
-		if maxIter > 0 && *n >= maxIter {
-			return net.IPNet{}, false
-		}
-		*n++
-		ip := uint32ToIP(candidate)
-		key := ip.String()
-		if _, exists := used[key]; !exists {
-			used[key] = struct{}{}
-			if hint != nil {
-				*hint = candidate
-			}
-			return net.IPNet{IP: ip, Mask: net.CIDRMask(32, 32)}, true
-		}
-	}
-	return net.IPNet{}, false
-}
-
-// allocateOneIPv6 finds the next free IPv6 address in subnet.
-// hint works the same as in allocateOneIPv4: ring-buffer cursor updated on success.
-func allocateOneIPv6(subnet *net.IPNet, used map[string]struct{}, hint *net.IP) (net.IPNet, error) {
-	start, end, err := ipv6Range(subnet)
-	if err != nil {
-		return net.IPNet{}, err
-	}
-	ones, _ := subnet.Mask.Size()
-	maxIter := 0
-	if ones < 112 {
-		maxIter = maxIPv6PeersReported
-	}
-
-	searchFrom := ipv6SearchFrom(start, end, hint)
-
-	n := 0
-	// First pass: searchFrom → end. Wrap-around pass: start → searchFrom−1.
-	if ip, ok := scanIPv6Range(searchFrom, end, maxIter, &n, used, hint); ok {
-		return ip, nil
-	}
-	if ipAfterIPv6(searchFrom, start) {
-		if ip, ok := scanIPv6Range(start, prevIPv6(searchFrom), maxIter, &n, used, hint); ok {
-			return ip, nil
-		}
-	}
-	return net.IPNet{}, ErrNoAvailableIP
-}
-
-// ipv6SearchFrom resolves the ring-buffer start address for IPv6 allocation.
-func ipv6SearchFrom(start, end net.IP, hint *net.IP) net.IP {
-	searchFrom := make(net.IP, 16)
-	copy(searchFrom, start)
-	if hint == nil || *hint == nil {
-		return searchFrom
-	}
-	last := (*hint).To16()
-	// Use hint only if it's inside the current subnet range.
-	if ipAfterIPv6(start, last) || ipAfterIPv6(last, end) {
-		return searchFrom
-	}
-	next := nextIPv6(last)
-	if !ipAfterIPv6(next, end) {
-		copy(searchFrom, next)
-	}
-	// If next overflows past end, searchFrom stays at start (full wrap).
-	return searchFrom
-}
-
-// scanIPv6Range scans [from, to] for the first free IPv6 address.
-// n is a shared iteration counter; maxIter > 0 caps total iterations across passes.
-func scanIPv6Range(from, to net.IP, maxIter int, n *int, used map[string]struct{}, hint *net.IP) (net.IPNet, bool) {
-	for ip := from; !ipAfterIPv6(ip, to); ip = nextIPv6(ip) {
-		if maxIter > 0 && *n >= maxIter {
-			return net.IPNet{}, false
-		}
-		*n++
-		key := ip.String()
-		if _, exists := used[key]; !exists {
-			used[key] = struct{}{}
-			if hint != nil {
-				allocated := make(net.IP, 16)
-				copy(allocated, ip)
-				*hint = allocated
-			}
-			return net.IPNet{IP: ip, Mask: net.CIDRMask(128, 128)}, true
-		}
-	}
-	return net.IPNet{}, false
-}
-
-// prevIPv6 returns the IPv6 address immediately before ip.
-func prevIPv6(ip net.IP) net.IP {
-	prev := make(net.IP, 16)
-	copy(prev, ip.To16())
-	for i := 15; i >= 0; i-- {
-		if prev[i] > 0 {
-			prev[i]--
-			return prev
-		}
-		prev[i] = 255
-	}
-	return prev
-}
-
 func resolveServerIP4(subnet *net.IPNet, serverIP string) (net.IP, error) {
-	if serverIP != "" {
-		ip := net.ParseIP(serverIP)
-		if ip == nil || ip.To4() == nil {
-			return nil, errors.New("wireguard.server_ip must be a valid IPv4 address")
-		}
-		if !subnet.Contains(ip) {
-			return nil, errors.New("wireguard.server_ip must be inside wireguard.subnet")
-		}
-		return ip.To4(), nil
-	}
-	start, _, err := ipv4Range(subnet)
-	if err != nil {
-		return nil, err
-	}
-	return start, nil
+	return resolveServerIP(subnet, serverIP, "wireguard.server_ip", "wireguard.subnet", true)
 }
 
 func resolveServerIP6(subnet *net.IPNet, serverIP string) (net.IP, error) {
-	if serverIP != "" {
-		ip := net.ParseIP(serverIP)
-		if ip == nil || ip.To4() != nil {
-			return nil, errors.New("wireguard.server_ip6 must be a valid IPv6 address")
-		}
-		if !subnet.Contains(ip) {
-			return nil, errors.New("wireguard.server_ip6 must be inside wireguard.subnet6")
-		}
-		return ip, nil
-	}
-	start, _, err := ipv6Range(subnet)
+	return resolveServerIP(subnet, serverIP, "wireguard.server_ip6", "wireguard.subnet6", false)
+}
+
+// resolveServerIP returns the configured server address, or the first host of
+// the subnet when none is configured.
+func resolveServerIP(subnet *net.IPNet, serverIP, ipField, subnetField string, want4 bool) (net.IP, error) {
+	prefix, err := prefixFromIPNet(subnet)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s: %w", subnetField, err)
 	}
-	return start, nil
-}
-
-func ipv4Range(subnet *net.IPNet) (net.IP, net.IP, error) {
-	network := subnet.IP.Mask(subnet.Mask).To4()
-	if network == nil {
-		return nil, nil, errors.New("WG_SUBNET must be IPv4")
+	if prefix.Addr().Is4() != want4 {
+		return nil, fmt.Errorf("%s has the wrong address family", subnetField)
 	}
-
-	mask := net.IP(subnet.Mask).To4()
-	if mask == nil {
-		return nil, nil, errors.New("WG_SUBNET mask must be IPv4")
+	first, _, err := hostRange(prefix)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", subnetField, err)
 	}
-
-	networkInt := ipToUint32(network)
-	maskInt := ipToUint32(mask)
-	broadcast := networkInt | ^maskInt
-
-	start := networkInt + 1
-	end := broadcast - 1
-	if end < start {
-		return nil, nil, errors.New("WG_SUBNET is too small")
+	if serverIP == "" {
+		return net.IP(first.AsSlice()), nil
 	}
-
-	return uint32ToIP(start), uint32ToIP(end), nil
-}
-
-func ipToUint32(ip net.IP) uint32 {
-	ip = ip.To4()
-	return uint32(ip[0])<<24 | uint32(ip[1])<<16 | uint32(ip[2])<<8 | uint32(ip[3])
-}
-
-func uint32ToIP(value uint32) net.IP {
-	ip := make(net.IP, net.IPv4len)
-	binary.BigEndian.PutUint32(ip, value)
-	return ip
-}
-
-func ipv6Range(subnet *net.IPNet) (net.IP, net.IP, error) {
-	if subnet.IP.To4() != nil {
-		return nil, nil, errors.New("expected IPv6 subnet")
-	}
-	ip := subnet.IP.To16()
-	if ip == nil {
-		return nil, nil, errors.New("invalid IPv6 subnet")
-	}
-	_, bits := subnet.Mask.Size()
-	if bits != 128 {
-		return nil, nil, errors.New("invalid IPv6 subnet mask")
-	}
-	network := make(net.IP, 16)
-	copy(network, ip)
-	start := make(net.IP, 16)
-	copy(start, network)
-	for i := 15; i >= 0; i-- {
-		if start[i] < 255 {
-			start[i]++
-			break
+	a, err := netip.ParseAddr(serverIP)
+	if err != nil || a.Is4() != want4 || a.Is4In6() {
+		family := "IPv6"
+		if want4 {
+			family = "IPv4"
 		}
-		start[i] = 0
+		return nil, fmt.Errorf("%s must be a valid %s address", ipField, family)
 	}
-	mask := subnet.Mask
-	broadcast := make(net.IP, 16)
-	for i := range 16 {
-		broadcast[i] = network[i] | ^mask[i]
+	if !prefix.Contains(a) {
+		return nil, fmt.Errorf("%s must be inside %s", ipField, subnetField)
 	}
-	end := make(net.IP, 16)
-	copy(end, broadcast)
-	for i := 15; i >= 0; i-- {
-		if end[i] > 0 {
-			end[i]--
-			break
-		}
-		end[i] = 255
-	}
-	if ipAfterIPv6(start, end) {
-		return nil, nil, errors.New("IPv6 subnet is too small")
-	}
-	return start, end, nil
-}
-
-func nextIPv6(ip net.IP) net.IP {
-	next := make(net.IP, 16)
-	copy(next, ip.To16())
-	for i := 15; i >= 0; i-- {
-		if next[i] < 255 {
-			next[i]++
-			return next
-		}
-		next[i] = 0
-	}
-	return next
-}
-
-func ipAfterIPv6(a, b net.IP) bool {
-	a = a.To16()
-	b = b.To16()
-	for i := range 16 {
-		if a[i] != b[i] {
-			return a[i] > b[i]
-		}
-	}
-	return false
+	return net.IP(a.AsSlice()), nil
 }
 
 func keepaliveInterval() *time.Duration {
@@ -1334,87 +1151,20 @@ func keepaliveInterval() *time.Duration {
 	return &interval
 }
 
-func possiblePeerCount(subnet *net.IPNet, serverIP net.IP) (int, error) {
-	start, end, err := ipv4Range(subnet)
-	if err != nil {
-		return 0, err
-	}
-
-	startInt := ipToUint32(start)
-	endInt := ipToUint32(end)
-	if endInt < startInt {
-		return 0, nil
-	}
-	total := int(endInt-startInt) + 1
-
-	if serverIP != nil {
-		serverIPv4 := serverIP.To4()
-		if serverIPv4 != nil {
-			serverInt := ipToUint32(serverIPv4)
-			if serverInt >= startInt && serverInt <= endInt {
-				total--
-			}
-		}
-	}
-
-	if total < 0 {
-		return 0, nil
-	}
-	return total, nil
-}
-
-const (
-	maxIPv6PeersReported = 65536
-	// maxIPv4Iter caps the allocation scan for large IPv4 subnets (e.g. /8).
-	// Matches the IPv6 cap so both families have consistent worst-case behaviour.
-	maxIPv4Iter = 65536
-)
-
-func possiblePeerCountIPv6(subnet *net.IPNet, serverIP net.IP) (int, error) {
-	start, end, err := ipv6Range(subnet)
-	if err != nil {
-		return 0, err
-	}
-	ones, _ := subnet.Mask.Size()
-	if ones < 112 {
-		// Subnet too large to iterate; report capped count
-		count := maxIPv6PeersReported
-		if serverIP != nil {
-			ip := serverIP.To16()
-			if ip != nil && !ipAfterIPv6(start, ip) && !ipAfterIPv6(ip, end) {
-				count--
-			}
-		}
-		return count, nil
-	}
-	n := 0
-	for ip := start; !ipAfterIPv6(ip, end); ip = nextIPv6(ip) {
-		if serverIP != nil && ip.Equal(serverIP) {
-			continue
-		}
-		n++
-		if n > maxIPv6PeersReported {
-			return maxIPv6PeersReported, nil
-		}
-	}
-	return n, nil
-}
-
+// possiblePeerCountTotal is the number of peers the configured subnets can
+// hold. It is fixed at startup, so it is read from the pools, not recomputed.
 func (s *WireGuardService) possiblePeerCountTotal() (int, error) {
-	var total int
-	if s.subnet4 != nil {
-		n, err := possiblePeerCount(s.subnet4, s.serverIP4)
-		if err != nil {
+	if s.pool4 == nil && s.pool6 == nil {
+		if err := s.initPools(); err != nil {
 			return 0, err
 		}
-		total += n
 	}
-	if s.subnet6 != nil {
-		n, err := possiblePeerCountIPv6(s.subnet6, s.serverIP6)
-		if err != nil {
-			return 0, err
-		}
-		total += n
+	var total int
+	if s.pool4 != nil {
+		total += s.pool4.capacity
+	}
+	if s.pool6 != nil {
+		total += s.pool6.capacity
 	}
 	return total, nil
 }

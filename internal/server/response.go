@@ -16,14 +16,11 @@ type PaginationMeta struct {
 // Response is a generic API response envelope with a typed data payload and optional metadata.
 type Response[T any] struct {
 	Data T              `json:"data"`
-	Meta PaginationMeta `json:"meta,omitempty"`
+	Meta PaginationMeta `json:"meta"`
 }
 
 // PeerListResponse is the envelope for paginated peer list responses.
 type PeerListResponse = Response[[]wireguard.PeerListItem]
-
-// StatsResponse is the envelope for stats responses.
-type StatsResponse = Response[wireguard.Stats]
 
 // HealthResponse is returned by the health check endpoint.
 type HealthResponse struct {
@@ -40,7 +37,3 @@ type ReadinessResponse struct {
 type DeletePeerResponse struct {
 	Status string `json:"status"`
 }
-
-// CreatePeerResponseEnvelope is the envelope for successful peer creation.
-// createPeerResponse is defined in handlers.go in the same package.
-type CreatePeerResponseEnvelope = Response[createPeerResponse]

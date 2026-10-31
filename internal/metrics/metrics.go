@@ -139,7 +139,7 @@ func (m *Metrics) Registry() *prometheus.Registry {
 }
 
 // OnPersistRollback satisfies wireguard.RollbackObserver — increments the
-// rollback counter for the given operation ("create" or "rotate").
+// rollback counter for the given operation (create, rotate, delete, expire).
 func (m *Metrics) OnPersistRollback(op string) {
 	m.PersistRollback.WithLabelValues(op).Inc()
 }
@@ -148,6 +148,12 @@ func (m *Metrics) OnPersistRollback(op string) {
 // the alert-grade counter when a rollback itself failed.
 func (m *Metrics) OnPersistRollbackFailed() {
 	m.PersistRollbackFailed.Inc()
+}
+
+// OnPeersExpired satisfies wireguard.RollbackObserver — counts peers removed
+// by the expiry cleanup as successful "expire" operations.
+func (m *Metrics) OnPeersExpired(n int) {
+	m.PeerOps.WithLabelValues(OpExpire, ResultSuccess).Add(float64(n))
 }
 
 // PeersSnapshot mirrors the three peer-population buckets that /stats already

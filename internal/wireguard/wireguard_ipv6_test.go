@@ -13,69 +13,6 @@ const (
 	ipv6NextAddr      = "fd00::2"
 )
 
-func TestIPv6Range(t *testing.T) {
-	_, subnet, _ := net.ParseCIDR(subnet6TestCIDR)
-	start, end, err := ipv6Range(subnet)
-	if err != nil {
-		t.Fatalf("ipv6Range: %v", err)
-	}
-	if start == nil || end == nil {
-		t.Fatal("start and end should be non-nil")
-	}
-	if ipAfterIPv6(start, end) {
-		t.Error("start should be before or equal to end")
-	}
-}
-
-func TestIPv6RangeInvalidSubnet(t *testing.T) {
-	_, subnet4, _ := net.ParseCIDR("10.0.0.0/24")
-	_, _, err := ipv6Range(subnet4)
-	if err == nil {
-		t.Error("expected error for IPv4 subnet")
-	}
-}
-
-func TestIPv6RangeTooSmall(t *testing.T) {
-	_, subnet, _ := net.ParseCIDR("fd00::/128")
-	_, _, err := ipv6Range(subnet)
-	if err == nil {
-		t.Error("expected error for /128 subnet")
-	}
-}
-
-func TestNextIPv6(t *testing.T) {
-	ip := net.ParseIP(ipv6TestAddr1)
-	next := nextIPv6(ip)
-	if next == nil {
-		t.Fatal("next should be non-nil")
-	}
-	if next.String() != ipv6NextAddr {
-		t.Errorf("expected %s, got %s", ipv6NextAddr, next.String())
-	}
-}
-
-func TestNextIPv6Rollover(t *testing.T) {
-	ip := net.ParseIP("fd00::ff")
-	next := nextIPv6(ip)
-	if next.String() != "fd00::100" {
-		t.Errorf("expected fd00::100, got %s", next.String())
-	}
-}
-
-func TestIPAfterIPv6(t *testing.T) {
-	a := net.ParseIP(ipv6NextAddr)
-	b := net.ParseIP(ipv6TestAddr1)
-	if !ipAfterIPv6(a, b) {
-		t.Error("a should be after b")
-	}
-	if ipAfterIPv6(b, a) {
-		t.Error("b should not be after a")
-	}
-	if ipAfterIPv6(a, a) {
-		t.Error("same IP should not be after itself")
-	}
-}
-
 func TestResolveServerIP6(t *testing.T) {
 	_, subnet, _ := net.ParseCIDR(subnet6TestCIDR64)
 	ip, err := resolveServerIP6(subnet, ipv6TestAddr1)
@@ -110,54 +47,6 @@ func TestResolveServerIP6EmptyUsesFirst(t *testing.T) {
 	}
 	if ip == nil {
 		t.Fatal("expected non-nil IP")
-	}
-}
-
-func TestAllocateOneIPv6(t *testing.T) {
-	_, subnet, _ := net.ParseCIDR(subnet6TestCIDR)
-	used := map[string]struct{}{}
-	ipNet, err := allocateOneIPv6(subnet, used, nil)
-	if err != nil {
-		t.Fatalf("allocateOneIPv6: %v", err)
-	}
-	if ipNet.IP.String() != ipv6TestAddr1 {
-		t.Errorf("expected %s, got %s", ipv6TestAddr1, ipNet.IP.String())
-	}
-	if _, ok := used[ipNet.IP.String()]; !ok {
-		t.Error("used should contain allocated IP")
-	}
-}
-
-func TestPossiblePeerCountIPv6(t *testing.T) {
-	_, subnet, _ := net.ParseCIDR(subnet6TestCIDR)
-	n, err := possiblePeerCountIPv6(subnet, nil)
-	if err != nil {
-		t.Fatalf("possiblePeerCountIPv6: %v", err)
-	}
-	if n <= 0 {
-		t.Errorf("expected positive count, got %d", n)
-	}
-}
-
-func TestIpv4RangeTooSmall(t *testing.T) {
-	// /31 has only 2 addresses (network + broadcast), no usable host range
-	_, subnet31, _ := net.ParseCIDR("10.0.0.0/31")
-	_, _, err := ipv4Range(subnet31)
-	if err == nil {
-		t.Fatal("expected error for /31 subnet (too small)")
-	}
-}
-
-func TestAllocateOneIPv6AllUsed(t *testing.T) {
-	// /126 has 4 addresses: network, 2 usable, broadcast → start=::1, end=::2
-	_, subnet, _ := net.ParseCIDR("fd00::/126")
-	used := map[string]struct{}{
-		"fd00::1":    {},
-		ipv6NextAddr: {},
-	}
-	_, err := allocateOneIPv6(subnet, used, nil)
-	if err == nil {
-		t.Fatal("expected ErrNoAvailableIP when all IPs are used")
 	}
 }
 
@@ -198,15 +87,12 @@ func TestEnsurePeerDualStackIPv6ExhaustionReleasesIPv4(t *testing.T) {
 	}
 }
 
-// countUsedIPv4 counts IPv4 addresses currently reserved in the allocator cache.
+// countUsedIPv4 counts IPv4 addresses currently reserved in the pool.
 func countUsedIPv4(svc *WireGuardService) int {
-	n := 0
-	for k := range svc.usedIPs {
-		if ip := net.ParseIP(k); ip != nil && ip.To4() != nil {
-			n++
-		}
+	if svc.pool4 == nil {
+		return 0
 	}
-	return n
+	return len(svc.pool4.used)
 }
 
 func TestAppendIfNotPresent(t *testing.T) {

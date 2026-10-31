@@ -57,6 +57,9 @@ func (s *WireGuardService) cleanupExpiredPeers() {
 	if err != nil {
 		slog.Error("cleanup: batch delete expired peers", "count", len(candidates), "error", err)
 	}
+	if s.rollbackObs != nil {
+		s.rollbackObs.OnPeersExpired(len(deleted))
+	}
 	for _, d := range deleted {
 		slog.Info("audit.peer_expired",
 			"peerId", d.peerID,
@@ -122,9 +125,10 @@ func (s *WireGuardService) doCleanupBatch(candidates []string, now time.Time) ([
 		return nil, err
 	}
 
+	s.store.DeleteBatch(ids...)
 	deleted := make([]expiredPeerInfo, 0, len(toRemove))
 	for _, rec := range toRemove {
-		s.forgetPeerLocked(rec)
+		s.releaseAllocatedIPs(rec.AllowedIPs)
 		ips := make([]string, len(rec.AllowedIPs))
 		for i, aip := range rec.AllowedIPs {
 			ips[i] = aip.String()

@@ -26,7 +26,7 @@ func TestPaginationMetaJSON(t *testing.T) {
 		t.Fatalf("marshal PaginationMeta: %v", err)
 	}
 
-	var out map[string]interface{}
+	var out map[string]any
 	if err := json.Unmarshal(data, &out); err != nil {
 		t.Fatalf("unmarshal PaginationMeta JSON: %v", err)
 	}
@@ -62,7 +62,7 @@ func TestPeerListResponseJSON(t *testing.T) {
 		t.Fatalf("marshal PeerListResponse: %v", err)
 	}
 
-	var payload map[string]interface{}
+	var payload map[string]any
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		t.Fatalf("unmarshal PeerListResponse JSON: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestPeerListResponseJSON(t *testing.T) {
 	if _, ok := payload["data"]; !ok {
 		t.Fatalf("expected data field in PeerListResponse JSON, got %v", payload)
 	}
-	if meta, ok := payload["meta"].(map[string]interface{}); !ok || meta["totalItems"] != float64(1) {
+	if meta, ok := payload["meta"].(map[string]any); !ok || meta["totalItems"] != float64(1) {
 		t.Fatalf("expected meta.totalItems=1 in PeerListResponse JSON, got %v", payload["meta"])
 	}
 }
@@ -86,7 +86,7 @@ func TestHealthAndReadinessResponsesJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal ReadinessResponse: %v", err)
 	}
-	var out map[string]interface{}
+	var out map[string]any
 	if err := json.Unmarshal(data, &out); err != nil {
 		t.Fatalf("unmarshal ReadinessResponse JSON: %v", err)
 	}

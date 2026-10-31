@@ -241,14 +241,7 @@ func TestBuildAddressLinesSubnet6Error(t *testing.T) {
 
 func TestEnsureWireGuardConfigNew(t *testing.T) {
 	dir := t.TempDir()
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-	defer func() { _ = os.Chdir(cwd) }()
+	t.Chdir(dir)
 
 	cfg := config.Config{
 		WGInterface:  "wgtest",
@@ -271,14 +264,7 @@ func TestEnsureWireGuardConfigNew(t *testing.T) {
 func chdirTemp(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(cwd) })
+	t.Chdir(dir)
 	return dir
 }
 

@@ -48,17 +48,15 @@ func TestIsFatalServerError(t *testing.T) {
 }
 
 func TestIsDebugEnabled(t *testing.T) {
-	orig := os.Getenv("DEBUG")
-	defer os.Setenv("DEBUG", orig)
-	os.Unsetenv("DEBUG")
+	t.Setenv("DEBUG", "")
 	if isDebugEnabled() {
 		t.Error("unset should be false")
 	}
-	os.Setenv("DEBUG", "true")
+	t.Setenv("DEBUG", "true")
 	if !isDebugEnabled() {
 		t.Error("true should be true")
 	}
-	os.Setenv("DEBUG", "1")
+	t.Setenv("DEBUG", "1")
 	if !isDebugEnabled() {
 		t.Error("1 should be true")
 	}
@@ -121,14 +119,7 @@ func TestHandleInitInit(t *testing.T) {
 	if err := os.WriteFile(wgDir+"/"+testWGConfFile, []byte(testWGConfBody), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-	defer func() { _ = os.Chdir(cwd) }()
+	t.Chdir(dir)
 
 	cfg := config.Config{
 		WGInterface:  testWGInterface,
@@ -155,14 +146,7 @@ func TestHandleInitInitPrintPath(t *testing.T) {
 	if err := os.WriteFile(wgDir+"/"+testWGConfFile, []byte(testWGConfBody), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-	defer func() { _ = os.Chdir(cwd) }()
+	t.Chdir(dir)
 
 	cfg := config.Config{
 		WGInterface:  testWGInterface,
