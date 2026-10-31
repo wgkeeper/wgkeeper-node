@@ -45,41 +45,31 @@ On every start the node writes the WireGuard config from `config.yaml` (addresse
 
 ## Quick start
 
-Run this on a Linux host with WireGuard support (kernel 5.6+) and Docker.
+On a Linux server with kernel 5.6+ (Ubuntu 22.04 or newer, Debian 12 or newer):
 
-1. Get the Compose file and the example config:
+```bash
+curl -fsSL https://raw.githubusercontent.com/wgkeeper/wgkeeper-node/main/scripts/install.sh | sudo bash
+```
 
-   ```bash
-   git clone https://github.com/wgkeeper/wgkeeper-node.git && cd wgkeeper-node
-   cp config.example.yaml config.yaml
-   ```
+The [install script](scripts/install.sh) installs Docker if it's missing, puts the node into `/opt/wgkeeper` with a new API key, starts it and prints the API address and key. Add `-s -- --domain node1.example.com` after `bash` to put Caddy with an automatic HTTPS certificate in front of the API. Read the script first if you prefer; [Deployment](docs/deployment.md) also covers installing by hand.
 
-2. Edit `config.yaml`: set `auth.api_key` to a random value (`openssl rand -hex 32`). The outbound interface for NAT is detected from the default route.
+Create a peer:
 
-3. Start the node:
+```bash
+curl -X POST http://127.0.0.1:51821/peers \
+  -H "X-API-Key: <your api key>" \
+  -H "Content-Type: application/json" \
+  -d "{\"peerId\": \"$(cat /proc/sys/kernel/random/uuid)\"}"
+```
 
-   ```bash
-   docker compose up -d
-   curl http://localhost:51821/healthz
-   ```
+The response has the server's public key and port, and the peer's keys and IP addresses: everything a client config needs. The peer's private key is returned only here and is not stored.
 
-4. Create a peer:
-
-   ```bash
-   curl -X POST http://localhost:51821/peers \
-     -H "X-API-Key: <your api key>" \
-     -H "Content-Type: application/json" \
-     -d "{\"peerId\": \"$(cat /proc/sys/kernel/random/uuid)\"}"
-   ```
-
-   The response has the server's public key and port, and the peer's keys and IP addresses: everything a client config needs. The peer's private key is returned only here and is not stored.
-
-WireGuard listens on `51820/udp`. The API is plain HTTP on `51821`, published on `127.0.0.1` only. To reach it from other machines, put a [reverse proxy](docs/deployment.md#behind-a-reverse-proxy) in front.
+WireGuard listens on `51820/udp`. Without `--domain` the API is plain HTTP on `127.0.0.1:51821`, reachable from the server only.
 
 ## Documentation
 
 - [Configuration](docs/configuration.md): requirements and every `config.yaml` key.
-- [Deployment](docs/deployment.md): Docker Compose, reverse proxy (Caddy and nginx examples), building from source.
+- [Deployment](docs/deployment.md): install script and updates, Docker Compose, reverse proxy (Caddy and nginx examples), building from source.
 - [API reference](docs/api.md): endpoints, request fields and errors.
 - [Peer store](docs/peer-store.md): how peers are persisted and restored after restarts.
 - [Metrics](docs/metrics.md): Prometheus metrics, alerting rules and a Grafana dashboard.

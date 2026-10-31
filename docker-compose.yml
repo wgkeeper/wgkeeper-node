@@ -59,10 +59,11 @@ services:
 # volumes:
 #   prometheus_data:
 
+# IPv4 comes from Docker's free address pools, so the network doesn't clash
+# with other Compose projects on the host.
 networks:
   default:
     enable_ipv6: true
     ipam:
       config:
-        - subnet: 172.18.0.0/16
         - subnet: fd00:dead:beef::/64

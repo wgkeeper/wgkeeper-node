@@ -36,3 +36,7 @@ docker-compose*.yml
 lefthook.yml
 **/*_test.go
 codecov.yml
+
+# Install script and end-to-end test
+/scripts
+/test

@@ -11,6 +11,10 @@ Planned as 2.0.0: a major release with breaking changes to the config, the deplo
 
 The node is now a plain HTTP API with API key auth. HTTPS, client IP filtering and rate limiting move to the reverse proxy in front of it. Peers are always persisted, and the NAT interface is detected automatically.
 
+### Added
+
+- `scripts/install.sh` installs or updates the node on a Linux server with one command: it installs Docker if needed, writes a config with a new API key, pins the image to a release and, with `--domain`, adds Caddy with HTTPS. Running it again updates the node and keeps the config, the server key and the peers. See `docs/deployment.md`.
+
 ### Removed
 
 - **Breaking:** `server.tls_cert` and `server.tls_key`. Terminate TLS in a reverse proxy; `examples/caddy` and `examples/nginx` show how.
@@ -36,6 +40,7 @@ The node refuses to start if the config still contains a removed key (`server.tl
 - The node logs `X-Forwarded-For` as `forwarded_for` next to the TCP peer address, so the client address is visible behind any proxy without proxy trust settings. `docs/deployment.md` documents what any reverse proxy must do, with nginx and Caddy examples.
 - Example configs moved from `docs/` to `examples/`: `nginx/nginx.conf`, `prometheus/prometheus.yml` (now uses `authorization.credentials_file`) and `grafana/dashboard.json`. New `examples/prometheus/alerts.yml` with alerting rules for a down node, a failed peer store rollback, a full subnet and error bursts.
 - The README is short; the reference (configuration, deployment, API, peer store, metrics, security) moved to [`docs/`](docs/README.md).
+- `docker-compose.yml` no longer fixes the IPv4 subnet of its network (`172.18.0.0/16`); Docker picks a free one, so the node starts on hosts where another Compose project already uses that range.
 - Compose health checks use `/readyz`, which also checks the WireGuard interface.
 - The entrypoint shows `wg-quick` output, so a failed start logs its cause.
 - `./data/` (peer store) is ignored by git, and `./wireguard/` and `./data/` are kept out of the Docker build context.

@@ -4,6 +4,41 @@ On every start the node writes `/etc/wireguard/<interface>.conf` (`./wireguard/<
 
 Check the [requirements](configuration.md#requirements) first.
 
+## Install script
+
+[`scripts/install.sh`](../scripts/install.sh) sets up the [Docker Compose](#docker-compose) deployment below on a Linux server:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wgkeeper/wgkeeper-node/main/scripts/install.sh | sudo bash
+```
+
+It checks that the kernel has WireGuard, installs Docker if it's missing, downloads the Compose file of the release into `/opt/wgkeeper`, pins the image to that release, writes `config.yaml` with a new API key and a `10.0.0.0/24` subnet, opens `51820/udp` (and `80`/`443` with `--domain`) if ufw is active, starts the node and prints the API address and key.
+
+Pass options after `bash -s --`:
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--version X.Y.Z` | latest stable release | Release to install, for example `2.0.0-rc.1` |
+| `--domain NAME` | | Add Caddy with an automatic Let's Encrypt certificate for this domain. Point the domain at the server first; ports 80 and 443 must be reachable |
+| `--subnet CIDR` | `10.0.0.0/24` | IPv4 subnet for peers, used only when `config.yaml` doesn't exist yet |
+| `--dir PATH` | `/opt/wgkeeper` | Install directory |
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wgkeeper/wgkeeper-node/main/scripts/install.sh | sudo bash -s -- --domain node1.example.com
+```
+
+The script never overwrites `config.yaml`, `./wireguard` (the server key) or `./data` (the peers). It replaces `docker-compose.yml` with the one from the release, so put your own Compose changes in `docker-compose.override.yml` next to it; the script includes that file when it exists.
+
+### Updating
+
+Run the script again. Without `--version` it updates to the latest stable release; with `--version` it installs that release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wgkeeper/wgkeeper-node/main/scripts/install.sh | sudo bash -s -- --version 2.0.1
+```
+
+It keeps the config, the server key and the peers, pulls the new image and restarts the node. Read the [changelog](../CHANGELOG.md) before updating to a new major version.
+
 ## Docker Compose
 
 [`docker-compose.yml`](../docker-compose.yml) runs `ghcr.io/wgkeeper/node` with `NET_ADMIN` and `no-new-privileges`, mounts `config.yaml`, `./wireguard` and `./data`, publishes `51820/udp` on all interfaces and the API on `127.0.0.1:51821` only, and sets the IPv4/IPv6 forwarding sysctls on an IPv6-capable network. Use the `edge` tag for the latest build from `main`.
