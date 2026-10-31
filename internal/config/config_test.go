@@ -183,7 +183,7 @@ wireguard:
 			if err == nil {
 				t.Fatalf("expected error for removed server.%s", key)
 			}
-			if !strings.Contains(err.Error(), "removed in 1.4.0") {
+			if !strings.Contains(err.Error(), "removed in 2.0.0") {
 				t.Fatalf("error should explain the removal, got %v", err)
 			}
 		})
@@ -742,7 +742,7 @@ metrics:
 `+block)
 			t.Setenv("NODE_CONFIG", path)
 			_, err := LoadConfig()
-			if err == nil || !strings.Contains(err.Error(), "removed in 1.4.0") {
+			if err == nil || !strings.Contains(err.Error(), "removed in 2.0.0") {
 				t.Fatalf("expected removal error for metrics.%s, got %v", name, err)
 			}
 		})

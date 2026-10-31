@@ -11,7 +11,6 @@
 [![GitHub Release](https://img.shields.io/github/v/release/wgkeeper/wgkeeper-node)](https://github.com/wgkeeper/wgkeeper-node/releases/latest)
 [![Image Pulls](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fghcr-badge.elias.eu.org%2Fapi%2Fwgkeeper%2Fwgkeeper-node%2Fnode&query=%24.downloadCount&label=image%20pulls&color=blue)](https://github.com/wgkeeper/wgkeeper-node/pkgs/container/node)
 [![codecov](https://codecov.io/gh/wgkeeper/wgkeeper-node/graph/badge.svg)](https://codecov.io/gh/wgkeeper/wgkeeper-node)
-[![Go Reference](https://pkg.go.dev/badge/github.com/wgkeeper/wgkeeper-node.svg)](https://pkg.go.dev/github.com/wgkeeper/wgkeeper-node)
 [![Go](https://img.shields.io/github/go-mod/go-version/wgkeeper/wgkeeper-node)](https://github.com/wgkeeper/wgkeeper-node/blob/main/go.mod)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/wgkeeper/wgkeeper-node/badge)](https://scorecard.dev/viewer/?uri=github.com/wgkeeper/wgkeeper-node)
 
@@ -130,7 +129,7 @@ Unknown keys are errors, so a misspelled key stops the node instead of silently 
 | `server.port` | API port, default `51821`. The API is plain HTTP; see [Deployment](#deployment) for HTTPS |
 | `auth.api_key` | API key for all protected endpoints, at least 32 characters |
 
-The node has no TLS, IP allowlist or rate limit settings. Put those in the reverse proxy in front of it, where they are easier to configure and to change. `server.tls_cert`, `server.tls_key`, `server.allowed_ips` and `server.trusted_proxies` were removed in 1.4.0; the node refuses to start if the config still has them, so a setup that relied on them is never silently left unprotected.
+The node has no TLS, IP allowlist or rate limit settings. Put those in the reverse proxy in front of it, where they are easier to configure and to change. `server.tls_cert`, `server.tls_key`, `server.allowed_ips` and `server.trusted_proxies` were removed in 2.0.0; the node refuses to start if the config still has them, so a setup that relied on them is never silently left unprotected.
 
 ### WireGuard
 

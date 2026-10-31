@@ -1,6 +1,6 @@
 # Benchmark Snapshot
 
-Date: 2026-10-31 (rows changed in 1.4.0 re-measured; the rest from 2026-04-30)
+Date: 2026-10-31 (rows changed in 2.0.0 re-measured; the rest from 2026-04-30)
 Host: darwin arm64 (Apple M2 Pro)  
 Go packages: `./internal/wireguard ./internal/server`  
 Command:
@@ -55,7 +55,7 @@ Values below use the median of 3 runs for readability.
 - `OpenFile` (~436 µs for 200 peers) is a one-time startup cost; irrelevant to steady-state throughput.
 - API handlers are fast in absolute terms (about 1-6 µs), with moderate allocation cost.
 - The 50k-peer benchmarks (`ListPeersPage50k`, `CleanupExpire5kOf50k`) show that list pages and expiry stay cheap at node scale; allocating an address after a delete is O(log n) (`IPPoolAllocateAfterDelete`).
-- `APIKeyMiddleware` is about 100 ns slower than before 1.4.0 because the key is compared as a SHA-256 digest, which hides its length; negligible next to a peer operation.
+- `APIKeyMiddleware` is about 100 ns slower than before 2.0.0 because the key is compared as a SHA-256 digest, which hides its length; negligible next to a peer operation.
 - Current performance baseline is strong; the largest optimization headroom is reducing API handler allocations.
 
 ## Benchmark Legend

@@ -45,9 +45,13 @@ go test -bench=. -benchmem -run='^$' ./internal/wireguard/ ./internal/server/
 
 ## Releases (maintainers)
 
+For a release candidate, tag the release commit as `vX.Y.Z-rc.N` and push the tag, leaving `CHANGELOG.md` as is. CI publishes the image as `X.Y.Z-rc.N` without moving `latest`, and creates a pre-release whose notes are the `[Unreleased]` section. Test it on a real node, fix, and tag the next `rc.N` as needed.
+
+For the release itself:
+
 1. Move the `[Unreleased]` entries in `CHANGELOG.md` to a new `## [X.Y.Z] - YYYY-MM-DD` section and update the compare links at the bottom.
 2. Merge to `main`, then tag and push: `git tag vX.Y.Z && git push origin vX.Y.Z`.
-3. CI builds and pushes the multi-arch image (`X.Y.Z`, and `latest` for stable tags), attaches the provenance attestation and SBOM, and creates the GitHub release with that `CHANGELOG.md` section as notes. Tags with a suffix (`v1.4.0-rc.1`) become pre-releases and do not move `latest`.
+3. CI builds and pushes the multi-arch image (`X.Y.Z`, and `latest` for stable tags), attaches the provenance attestation and SBOM, and creates the GitHub release with that `CHANGELOG.md` section as notes. Tags with a suffix (`v2.0.0-rc.1`) become pre-releases and do not move `latest`.
 
 ## License
 

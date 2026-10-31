@@ -7,6 +7,8 @@ Each release's notes on GitHub are taken from its section here.
 
 ## [Unreleased]
 
+Planned as 2.0.0: a major release with breaking changes to the config, the deployment files, the API and the logs. Read the **Breaking** entries before upgrading from 1.x.
+
 The node is now a plain HTTP API with API key auth. HTTPS, client IP filtering and rate limiting move to the reverse proxy in front of it. Peers are always persisted, and the NAT interface is detected automatically.
 
 ### Removed

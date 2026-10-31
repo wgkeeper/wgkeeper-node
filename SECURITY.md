@@ -28,13 +28,13 @@ What to expect:
 
 | Version | Supported |
 | --- | --- |
-| latest minor release (`1.x`) | yes |
+| latest minor release (`2.x`) | yes |
 | older releases | no, please upgrade |
 | `edge` and `sha-*` images | no, built from `main` for testing |
 
 ## Verifying images
 
-Release images on `ghcr.io/wgkeeper/node` are built by GitHub Actions from a tagged commit. Starting with 1.4.0 each image has a signed build provenance attestation and an SBOM. To check that an image was built from this repository:
+Release images on `ghcr.io/wgkeeper/node` are built by GitHub Actions from a tagged commit. Starting with 2.0.0 each image has a signed build provenance attestation and an SBOM. To check that an image was built from this repository:
 
 ```bash
 gh attestation verify oci://ghcr.io/wgkeeper/node:<version> --owner wgkeeper

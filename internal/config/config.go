@@ -71,7 +71,7 @@ type fileConfig struct {
 	Server struct {
 		Port string `yaml:"port"`
 
-		// Removed in 1.4.0: TLS, IP filtering and proxy trust belong in the
+		// Removed in 2.0.0: TLS, IP filtering and proxy trust belong in the
 		// reverse proxy. Still parsed so that an old config fails loudly
 		// instead of silently running without the protection it asks for.
 		TLSCert        string   `yaml:"tls_cert"`
@@ -96,7 +96,7 @@ type fileConfig struct {
 		Port  int    `yaml:"port"`
 		Token string `yaml:"token"`
 
-		// Removed in 1.4.0 together with per-peer metrics; parsed only to
+		// Removed in 2.0.0 together with per-peer metrics; parsed only to
 		// reject old configs with a clear error.
 		PerPeer    *bool `yaml:"per_peer"`
 		PerPeerMax *int  `yaml:"per_peer_max"`
@@ -172,7 +172,7 @@ func loadConfigFile(path string) (Config, error) {
 // at startup is the main guarantee of this section.
 func parseMetrics(fc fileConfig) (port int, token string, err error) {
 	if fc.Metrics.PerPeer != nil || fc.Metrics.PerPeerMax != nil {
-		return 0, "", fmt.Errorf("metrics.per_peer and metrics.per_peer_max were removed in 1.4.0; use GET /peers for per-peer traffic and handshakes")
+		return 0, "", fmt.Errorf("metrics.per_peer and metrics.per_peer_max were removed in 2.0.0; use GET /peers for per-peer traffic and handshakes")
 	}
 	port = fc.Metrics.Port
 	token = strings.TrimSpace(fc.Metrics.Token)
@@ -223,11 +223,11 @@ func parseServerAndAuth(fc fileConfig) (portValue int, apiKey string, err error)
 	return portValue, apiKey, nil
 }
 
-// rejectRemovedServerKeys fails on server options removed in 1.4.0. Ignoring
+// rejectRemovedServerKeys fails on server options removed in 2.0.0. Ignoring
 // them would leave a node that the operator believes is behind TLS or an IP
 // allowlist serving plain, unfiltered HTTP.
 func rejectRemovedServerKeys(fc fileConfig) error {
-	const hint = "removed in 1.4.0; terminate TLS and filter clients in a reverse proxy such as Caddy or nginx (see README)"
+	const hint = "removed in 2.0.0; terminate TLS and filter clients in a reverse proxy such as Caddy or nginx (see README)"
 	switch {
 	case strings.TrimSpace(fc.Server.TLSCert) != "" || strings.TrimSpace(fc.Server.TLSKey) != "":
 		return fmt.Errorf("server.tls_cert and server.tls_key were %s", hint)
