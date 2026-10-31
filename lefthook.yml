@@ -9,13 +9,14 @@ pre-commit:
 
 pre-push:
   commands:
+    # Tools are looked up in PATH (e.g. Homebrew) and then in $(go env GOPATH)/bin (go install).
     golangci-lint:
-      run: "$(go env GOPATH)/bin/golangci-lint run"
+      run: PATH="$PATH:$(go env GOPATH)/bin" golangci-lint run
     tests:
       run: go test ./...
     build:
       run: go build -o /dev/null ./...
     govulncheck:
-      run: "$(go env GOPATH)/bin/govulncheck ./..."
+      run: PATH="$PATH:$(go env GOPATH)/bin" govulncheck ./...
     mod-tidy:
       run: go mod tidy && git diff --exit-code go.mod go.sum
