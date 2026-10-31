@@ -30,11 +30,11 @@ failed=0
 
 cleanup() {
 	status=$?
-	if [ "${E2E_KEEP:-0}" = "1" ]; then
+	if [[ "${E2E_KEEP:-0}" == "1" ]]; then
 		echo "E2E_KEEP=1: leaving $NAME-* containers and network in place"
 		return
 	fi
-	if [ "$status" -ne 0 ] || [ "$failed" -ne 0 ]; then
+	if [[ "$status" -ne 0 ]] || [[ "$failed" -ne 0 ]]; then
 		echo "--- node logs"
 		docker logs "$NAME-node" 2>&1 | tail -n 80 || true
 	fi
@@ -74,7 +74,7 @@ wait_ready() {
 
 client() { docker exec "$NAME-client" "$@"; }
 
-if [ "${E2E_BUILD:-0}" = "1" ]; then
+if [[ "${E2E_BUILD:-0}" == "1" ]]; then
 	docker build -t "$IMAGE" .
 fi
 
@@ -114,7 +114,7 @@ server_port="$(echo "$created" | jq -r .server.listenPort)"
 peer_key="$(echo "$created" | jq -r .peer.privateKey)"
 peer_psk="$(echo "$created" | jq -r .peer.presharedKey)"
 peer_ip="$(echo "$created" | jq -r '.peer.allowedIPs[0]')"
-if [ -n "$server_key" ] && [ "$server_key" != null ]; then
+if [[ -n "$server_key" ]] && [[ "$server_key" != null ]]; then
 	pass "POST /peers returns keys and an address ($peer_ip)"
 else
 	fail "POST /peers returns keys"
@@ -150,7 +150,10 @@ if ! client wg-quick up wg0 >"$WORK/wg-quick.log" 2>&1; then
 fi
 
 # Every check below must go through the tunnel, or a PASS means nothing.
-via_tunnel() { [[ "$(client ip route get "$1")" == *" dev wg0 "* ]]; }
+via_tunnel() {
+	local dst=$1
+	[[ "$(client ip route get "$dst")" == *" dev wg0 "* ]]
+}
 for dst in "$SERVER_IP" 1.1.1.1 "$LAN_IP" 169.254.169.254; do
 	if ! via_tunnel "$dst"; then
 		fail "client routes $dst through the tunnel"
@@ -168,7 +171,7 @@ forwarded() {
 expect_ok "client reaches the server address over the tunnel (ICMP)" client ping -c 2 -W 3 "$SERVER_IP"
 expect_ok "handshake completed" sh -c "docker exec $NAME-client wg show wg0 latest-handshakes | awk 'BEGIN{ok=0} \$2 > 0 {ok=1} END{exit !ok}'"
 before="$(forwarded)"
-if client curl -sS -o /dev/null --max-time 10 http://1.1.1.1/ >/dev/null 2>&1 && [ "$(forwarded)" -gt "$before" ]; then
+if client curl -sS -o /dev/null --max-time 10 http://1.1.1.1/ >/dev/null 2>&1 && [[ "$(forwarded)" -gt "$before" ]]; then
 	pass "client reaches the internet through the node"
 else
 	fail "client reaches the internet through the node"
@@ -199,18 +202,18 @@ pass "node restarts with the existing data"
 
 expect_ok "peer survives the restart" api "$API/peers/$PEER_ID"
 rotated="$(api -X POST "$API/peers" -d "{\"peerId\":\"$PEER_ID\"}")"
-if [ "$(echo "$rotated" | jq -r .server.publicKey)" = "$server_key" ]; then
+if [[ "$(echo "$rotated" | jq -r .server.publicKey)" == "$server_key" ]]; then
 	pass "server public key is unchanged after the restart"
 else
 	fail "server public key is unchanged after the restart"
 fi
-if [ "$(echo "$rotated" | jq -r '.peer.allowedIPs[0]')" = "$peer_ip" ]; then
+if [[ "$(echo "$rotated" | jq -r '.peer.allowedIPs[0]')" == "$peer_ip" ]]; then
 	pass "rotation keeps the peer address"
 else
 	fail "rotation keeps the peer address"
 fi
 
-if [ "$failed" -ne 0 ]; then
+if [[ "$failed" -ne 0 ]]; then
 	echo "E2E: FAILED"
 	exit 1
 fi

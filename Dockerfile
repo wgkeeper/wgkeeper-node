@@ -22,9 +22,9 @@ FROM alpine:3.24
 WORKDIR /app
 
 RUN apk add --no-cache \
-    wireguard-tools \
     iproute2 \
-    iptables
+    iptables \
+    wireguard-tools
 
 COPY --from=builder /out/wgkeeper-node /app/wgkeeper-node
 COPY --chmod=0755 entrypoint.sh /app/entrypoint.sh

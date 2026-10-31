@@ -1,0 +1,13 @@
+# Project coverage may not drop by more than 1% against the base branch.
+# Patch coverage is reported but doesn't fail the check: the code that unit
+# tests can't reach (cmd/server, the netlink and wg-quick paths) runs in the
+# end-to-end test instead, which doesn't produce a coverage profile.
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+    patch:
+      default:
+        informational: true

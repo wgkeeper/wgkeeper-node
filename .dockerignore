@@ -35,3 +35,4 @@ pr.txt
 docker-compose*.yml
 lefthook.yml
 **/*_test.go
+codecov.yml

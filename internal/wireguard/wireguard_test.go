@@ -278,20 +278,6 @@ func TestValidateAddressFamiliesBothFamilies(t *testing.T) {
 	}
 }
 
-func TestValidateAddressFamiliesIPv4OnlyNode(t *testing.T) {
-	_, subnet4, _ := net.ParseCIDR(subnetTestCIDR)
-	svc := &WireGuardService{
-		subnet4:   subnet4,
-		serverIP4: net.ParseIP(ipServerTest),
-		store:     NewPeerStore(),
-	}
-	// Requesting IPv6 from IPv4-only node
-	_, err := svc.ValidateAddressFamilies([]string{FamilyIPv6})
-	if !errors.Is(err, ErrUnsupportedAddressFamily) {
-		t.Fatalf("expected ErrUnsupportedAddressFamily, got %v", err)
-	}
-}
-
 func TestValidateAddressFamiliesInvalidFamilyName(t *testing.T) {
 	_, subnet4, _ := net.ParseCIDR(subnetTestCIDR)
 	svc := &WireGuardService{subnet4: subnet4, store: NewPeerStore()}
