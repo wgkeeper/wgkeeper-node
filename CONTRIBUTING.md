@@ -29,6 +29,15 @@ govulncheck ./...
 go mod tidy && git diff --exit-code go.mod go.sum
 ```
 
+The end-to-end test runs the Docker image with a real WireGuard interface and a client container. It checks the peer lifecycle, that a peer reaches only the internet (not the node API, private networks or cloud metadata), and that peers and the server key survive a restart. It needs Docker on a kernel with WireGuard (Linux 5.6+ or Docker Desktop) and internet access:
+
+```bash
+E2E_BUILD=1 test/e2e/run.sh   # build the image, then test it
+E2E_KEEP=1 test/e2e/run.sh    # keep the wgk-e2e-* containers to debug a failure
+```
+
+Run it when you touch `wgconf.go`, the entrypoint, the Dockerfile or startup. CI runs it on every pull request, and the image is only published if it passes.
+
 Benchmarks for `internal/wireguard` and `internal/server` run on every pull request and the comparison with `main` is posted as a comment:
 
 ```bash

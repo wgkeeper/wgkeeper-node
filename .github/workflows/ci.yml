@@ -69,9 +69,30 @@ jobs:
           # Pinned so new linter releases don't break CI unexpectedly; bump manually.
           version: v2.15.0
 
+  # Runs the image with a real WireGuard interface and a client container:
+  # peer lifecycle, peer isolation and restart (see test/e2e/run.sh).
+  e2e:
+    name: End-to-end
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Build image
+        run: docker build -t wgkeeper-node:e2e .
+
+      - name: Run end-to-end test
+        env:
+          E2E_IMAGE: wgkeeper-node:e2e
+        run: test/e2e/run.sh
+
   build_push:
     name: Build & Push Image
-    needs: test
+    needs: [test, e2e]
     if: >
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
