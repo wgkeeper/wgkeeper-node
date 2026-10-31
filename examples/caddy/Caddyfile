@@ -1,0 +1,20 @@
+{
+	# Global options block (optional)
+	# email you@example.com
+}
+
+# Caddy gets and renews a Let's Encrypt certificate for this domain
+# automatically when ports 80 and 443 are reachable.
+api.example.com {
+	encode gzip zstd
+
+	# Optional: allow only your orchestrator. Everyone else is dropped before
+	# reaching the node.
+	# @blocked not remote_ip 203.0.113.7
+	# abort @blocked
+
+	# The node's API over the Docker network (Caddy installed on the host:
+	# 127.0.0.1:51821). Port must match server.port in config.yaml. Caddy sets
+	# X-Forwarded-For, which the node logs.
+	reverse_proxy wireguard:51821
+}

@@ -1,10 +1,11 @@
 package server
 
 import (
-	"context"
 	"fmt"
+	"io"
 	"log/slog"
-	"net"
+	"net/http"
+	"runtime/debug"
 
 	"github.com/wgkeeper/wgkeeper-node/internal/metrics"
 	"github.com/wgkeeper/wgkeeper-node/internal/wireguard"
@@ -12,33 +13,54 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const debugKey = "debug"
+// loopbackProxies may set X-Forwarded-For for ClientIP: a proxy on the same
+// host or in the same network namespace. For a proxy anywhere else, the raw
+// header is logged as forwarded_for instead. Client addresses are only ever
+// logged; no access decision depends on them.
+var loopbackProxies = []string{"127.0.0.1", "::1"}
 
-// defaultTrustedProxies is used when no trusted proxies are configured: only
-// loopback is trusted to set X-Forwarded-For, preventing header spoofing from
-// external clients.
-var defaultTrustedProxies = []string{"127.0.0.1", "::1"}
+// maxLoggedForwardedFor caps the X-Forwarded-For value written to logs.
+const maxLoggedForwardedFor = 256
+
+// forwardedFor returns the X-Forwarded-For header for logging. It is set by
+// whichever proxy is in front of the node (or by the client itself when there
+// is none), so it is informational only.
+func forwardedFor(r *http.Request) string {
+	v := r.Header.Get("X-Forwarded-For")
+	if len(v) > maxLoggedForwardedFor {
+		v = v[:maxLoggedForwardedFor]
+	}
+	return v
+}
+
+// routeMissKey marks a request that matched no route, so the request log can
+// tell internet scanners probing random paths from errors of real API calls.
+const routeMissKey = "wgkeeper.route_miss"
+
+// requestLogLevel picks the level of the request log line: errors for 5xx,
+// warnings for 4xx except a 404 for a path the API doesn't have, which is
+// scanner noise and logged at info.
+func requestLogLevel(status int, keys map[any]any) slog.Level {
+	switch {
+	case status >= http.StatusInternalServerError:
+		return slog.LevelError
+	case status == http.StatusNotFound && keys[routeMissKey] == true:
+		return slog.LevelInfo
+	case status >= http.StatusBadRequest:
+		return slog.LevelWarn
+	}
+	return slog.LevelInfo
+}
 
 // NewRouter builds the API router. m is optional — pass nil when metrics are
-// disabled; handlers nil-check before recording. trustedProxies lists the
-// reverse-proxy IPs/CIDRs allowed to set X-Forwarded-For; empty trusts only
-// loopback (see defaultTrustedProxies). A non-loopback proxy (e.g. a Caddy
-// container) must be listed here, otherwise allowed_ips and per-IP rate
-// limiting see the proxy address instead of the real client.
-func NewRouter(ctx context.Context, apiKey string, allowedNets []*net.IPNet, trustedProxies []string, wgService *wireguard.WireGuardService, m *metrics.Metrics, debug bool) *gin.Engine {
+// disabled; handlers nil-check before recording.
+func NewRouter(apiKey string, wgService *wireguard.WireGuardService, m *metrics.Metrics) *gin.Engine {
 	router := gin.New()
-	proxies := trustedProxies
-	if len(proxies) == 0 {
-		proxies = defaultTrustedProxies
-	}
-	if err := router.SetTrustedProxies(proxies); err != nil {
+	if err := router.SetTrustedProxies(loopbackProxies); err != nil {
 		panic(fmt.Sprintf("set trusted proxies: %v", err))
 	}
 	router.Use(requestIDMiddleware())
 	router.Use(securityHeadersMiddleware())
-	router.Use(bodyLimitMiddleware(MaxRequestBodySize))
-	router.Use(newRateLimitMiddleware(ctx, allowedNets))
-	router.Use(debugMiddleware(debug))
 	// Metrics middleware records request count + duration. Nil-safe: when
 	// metrics are disabled, GinMiddleware returns a no-op so we register it
 	// unconditionally.
@@ -47,12 +69,7 @@ func NewRouter(ctx context.Context, apiKey string, allowedNets []*net.IPNet, tru
 		if param.Path == "/healthz" || param.Path == "/readyz" {
 			return ""
 		}
-		level := slog.LevelInfo
-		if param.StatusCode >= 500 {
-			level = slog.LevelError
-		} else if param.StatusCode >= 400 {
-			level = slog.LevelWarn
-		}
+		level := requestLogLevel(param.StatusCode, param.Keys)
 		requestID := GetRequestIDFromContext(param.Request.Context())
 		slog.Log(param.Request.Context(), level, "http request",
 			"method", param.Method,
@@ -60,31 +77,45 @@ func NewRouter(ctx context.Context, apiKey string, allowedNets []*net.IPNet, tru
 			"status", param.StatusCode,
 			"latency", param.Latency,
 			"ip", param.ClientIP,
+			"forwarded_for", forwardedFor(param.Request),
 			"request_id", requestID,
 		)
 		return ""
-	}), gin.Recovery())
-	registerRoutes(router, apiKey, allowedNets, wgService, m, debug)
+	}), recoveryMiddleware())
+	// Gin still writes its default 404 body after this handler.
+	router.NoRoute(func(c *gin.Context) { c.Set(routeMissKey, true) })
+	registerRoutes(router, apiKey, wgService, m)
 	return router
 }
 
-func debugMiddleware(debug bool) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		c.Set(debugKey, debug)
-		c.Next()
-	}
-}
-
-func registerRoutes(router *gin.Engine, apiKey string, allowedNets []*net.IPNet, wgService *wireguard.WireGuardService, m *metrics.Metrics, debug bool) {
+func registerRoutes(router *gin.Engine, apiKey string, wgService *wireguard.WireGuardService, m *metrics.Metrics) {
 	// Liveness probe: process is up and able to serve requests.
 	router.GET("/healthz", healthHandler)
 	// Readiness probe: WireGuard backend is reachable and stats can be fetched.
 	router.GET("/readyz", readinessHandler(wgService))
-	router.GET("/stats", ipWhitelistMiddleware(allowedNets), apiKeyMiddleware(apiKey), statsHandler(wgService, debug))
+	router.GET("/stats", apiKeyMiddleware(apiKey), statsHandler(wgService))
 
-	peers := router.Group("/peers", ipWhitelistMiddleware(allowedNets), apiKeyMiddleware(apiKey))
-	peers.GET("", listPeersHandler(wgService, debug))
-	peers.GET("/:peerId", getPeerHandler(wgService, debug))
-	peers.POST("", createPeerHandler(wgService, m, debug))
-	peers.DELETE("/:peerId", deletePeerHandler(wgService, m, debug))
+	// The body limit runs after auth, so unauthenticated requests never get
+	// their body read.
+	peers := router.Group("/peers", apiKeyMiddleware(apiKey), bodyLimitMiddleware(MaxRequestBodySize))
+	peers.GET("", listPeersHandler(wgService))
+	peers.GET("/:peerId", getPeerHandler(wgService))
+	peers.POST("", createPeerHandler(wgService, m))
+	peers.DELETE("/:peerId", deletePeerHandler(wgService, m))
+}
+
+// recoveryMiddleware turns a handler panic into a 500 and logs it through
+// slog with the request ID and stack. gin's own Recovery dumps the request
+// headers in debug mode, which would put X-API-Key into the log.
+func recoveryMiddleware() gin.HandlerFunc {
+	return gin.CustomRecoveryWithWriter(io.Discard, func(c *gin.Context, recovered any) {
+		slog.Error("panic recovered",
+			"request_id", GetRequestID(c),
+			"method", c.Request.Method,
+			"path", c.FullPath(),
+			"panic", recovered,
+			"stack", string(debug.Stack()),
+		)
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "internal error", "code": "internal_error"})
+	})
 }

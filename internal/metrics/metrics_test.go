@@ -134,3 +134,11 @@ func TestBindPeersProviderSkipsOnError(t *testing.T) {
 		t.Errorf("peers gauge should be absent on provider error; got:\n%s", out)
 	}
 }
+
+func TestOnPeersExpiredCountsExpireOps(t *testing.T) {
+	m := New()
+	m.OnPeersExpired(3)
+	if got := testutil.ToFloat64(m.PeerOps.WithLabelValues(OpExpire, ResultSuccess)); got != 3 {
+		t.Errorf("expire ops = %v, want 3", got)
+	}
+}

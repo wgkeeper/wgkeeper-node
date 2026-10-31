@@ -1,0 +1,5 @@
+# LF everywhere: entrypoint.sh runs in the container and breaks with CRLF from a Windows checkout.
+* text=auto eol=lf
+
+go.sum linguist-generated=true
+docs/grafana-dashboard.json linguist-generated=true

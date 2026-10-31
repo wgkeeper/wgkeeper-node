@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -30,36 +29,43 @@ const (
 	// to finish an in-flight expiry pass before giving up. Must exceed wgOpTimeout
 	// (10 s) to allow a running configureDevice call to complete.
 	cleanupShutdownTimeout = 15 * time.Second
+
+	// httpShutdownTimeout bounds how long in-flight API requests may run after
+	// a shutdown signal. Together with the cleanup wait it stays under the
+	// compose files' stop_grace_period (30s).
+	httpShutdownTimeout = 10 * time.Second
 )
 
 func main() {
 	debug := isDebugEnabled()
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel(debug)})))
 	setupGinMode(debug)
-
-	cfg, err := config.LoadConfig()
-	if err != nil {
-		slog.Error("load config", "error", err)
+	if err := run(os.Args); err != nil {
+		slog.Error("wgkeeper-node stopped", "error", err)
 		os.Exit(1)
 	}
+}
 
-	if handled, err := handleInit(cfg, os.Args); handled {
-		if err != nil {
-			slog.Error(err.Error())
-			os.Exit(1)
-		}
-		return
+// run starts the node and blocks until a shutdown signal or a fatal server
+// error. Keeping it separate from main means every deferred cleanup (closing
+// the peer store, stopping background work) runs before the process exits.
+func run(args []string) error {
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	if handled, err := handleInit(cfg, args); handled {
+		return err
 	}
 
 	if _, err := wireguard.EnsureWireGuardConfig(cfg); err != nil {
-		slog.Error("ensure WireGuard config", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("ensure WireGuard config: %w", err)
 	}
 
 	wgService, err := wireguard.NewWireGuardService(cfg)
 	if err != nil {
-		slog.Error("init WireGuard", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("init WireGuard: %w", err)
 	}
 	defer func() {
 		if err := wgService.Close(); err != nil {
@@ -76,9 +82,8 @@ func main() {
 	}()
 
 	addr := cfg.Addr()
-	protocol := protocolFromConfig(cfg)
 	slog.Info("starting", "service", version.Name, "version", version.Version)
-	slog.Info("listening", "addr", addr, "protocol", protocol)
+	slog.Info("listening", "addr", addr, "protocol", "http")
 	slog.Info("wireguard ready", "iface", cfg.WGInterface, "listen", cfg.WGListenPort, "subnets", formatSubnetsLog(cfg))
 
 	var metricsBundle *metrics.Metrics
@@ -88,10 +93,6 @@ func main() {
 		wgService.SetRollbackObserver(metricsBundle)
 		metricsBundle.BindPeersProvider(peerSnapshotAdapter{svc: wgService})
 		metricsBundle.BindWireGuardProvider(wgSnapshotAdapter{svc: wgService})
-		if cfg.MetricsPerPeer {
-			metricsBundle.BindPerPeerProvider(perPeerSnapshotAdapter{svc: wgService}, cfg.MetricsPerPeerMax)
-			slog.Info("per-peer metrics enabled", "cap", cfg.MetricsPerPeerMax)
-		}
 		metricsSrv := metrics.NewServer(cfg.MetricsAddr(), cfg.MetricsToken, metricsBundle)
 		slog.Info("metrics enabled", "addr", cfg.MetricsAddr())
 		go func() {
@@ -104,40 +105,43 @@ func main() {
 		close(metricsDone)
 	}
 
-	httpServer := newHTTPServer(appCtx, cfg, addr, wgService, metricsBundle, debug)
+	httpServer := newHTTPServer(cfg, addr, wgService, metricsBundle)
 
 	serverErr := make(chan error, 1)
 	go func() {
-		serverErr <- runServer(cfg, httpServer)
+		serverErr <- httpServer.ListenAndServe()
 	}()
 
 	shutdownSignal := make(chan os.Signal, 1)
 	signal.Notify(shutdownSignal, syscall.SIGINT, syscall.SIGTERM)
 
+	var fatal error
 	select {
 	case err := <-serverErr:
 		if isFatalServerError(err) {
-			slog.Error("server error", "error", err)
-			os.Exit(1)
+			fatal = fmt.Errorf("server error: %w", err)
 		}
 	case sig := <-shutdownSignal:
 		slog.Info("shutdown signal received", "signal", sig)
 	}
 
+	// Stop taking API writes first and let in-flight requests finish, then stop
+	// the cleanup loop and metrics; the deferred wgService.Close runs last, so no
+	// peer change can race the peer store being closed.
+	ctx, cancel := context.WithTimeout(context.Background(), httpShutdownTimeout)
+	defer cancel()
+	if err := httpServer.Shutdown(ctx); err != nil {
+		slog.Error("shutdown error", "error", err)
+	}
 	appCancel()
 	select {
 	case <-cleanupDone:
 	case <-time.After(cleanupShutdownTimeout):
 		slog.Warn("cleanup goroutine did not finish in time, proceeding with shutdown")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := httpServer.Shutdown(ctx); err != nil {
-		slog.Error("shutdown error", "error", err)
-	}
-	// Wait for the metrics listener (if enabled) to finish too. metrics.Run
-	// reacts to appCancel and shuts down its own server with a 5s budget.
+	// metrics.Run reacts to appCancel and shuts down its own server with a 5s budget.
 	<-metricsDone
+	return fatal
 }
 
 // peerSnapshotAdapter bridges WireGuardService.Stats() to metrics.PeersProvider
@@ -177,34 +181,18 @@ func (a wgSnapshotAdapter) WireGuardSnapshot() (metrics.WireGuardSnapshot, error
 	}, nil
 }
 
-// perPeerSnapshotAdapter bridges WireGuardService.PeersSnapshot() to the
-// metrics package's PerPeerProvider. Same decoupling pattern as the other
-// adapters — wireguard package never imports metrics.
-type perPeerSnapshotAdapter struct {
-	svc *wireguard.WireGuardService
-}
-
-func (a perPeerSnapshotAdapter) PeersSnapshot() ([]metrics.PeerSnapshot, error) {
-	src, err := a.svc.PeersSnapshot()
-	if err != nil {
-		return nil, err
+// logLevel returns the log level for DEBUG. DEBUG only makes logs more
+// verbose; API responses are the same either way.
+func logLevel(debug bool) slog.Level {
+	if debug {
+		return slog.LevelDebug
 	}
-	out := make([]metrics.PeerSnapshot, len(src))
-	for i, p := range src {
-		out[i] = metrics.PeerSnapshot{
-			PeerID:                  p.PeerID,
-			AllowedIP:               p.AllowedIP,
-			ReceiveBytes:            p.ReceiveBytes,
-			TransmitBytes:           p.TransmitBytes,
-			LastHandshakeAgeSeconds: p.LastHandshakeAgeSeconds,
-		}
-	}
-	return out, nil
+	return slog.LevelInfo
 }
 
 func setupGinMode(debug bool) {
 	if debug {
-		slog.Warn("DEBUG is enabled; do not use in production (error details exposed to clients)")
+		slog.Debug("DEBUG is enabled: verbose logs")
 		gin.SetMode(gin.DebugMode)
 		return
 	}
@@ -221,49 +209,23 @@ func formatSubnetsLog(cfg config.Config) string {
 	return cfg.WGSubnet6
 }
 
-func protocolFromConfig(cfg config.Config) string {
-	if cfg.TLSEnabled() {
-		return "https"
-	}
-	return "http"
-}
-
 func isFatalServerError(err error) bool {
 	return err != nil && !errors.Is(err, http.ErrServerClosed)
 }
 
-func newHTTPServer(ctx context.Context, cfg config.Config, addr string, wgService *wireguard.WireGuardService, m *metrics.Metrics, debug bool) *http.Server {
-	srv := &http.Server{
+// newHTTPServer serves the API over plain HTTP. TLS, client filtering and
+// rate limiting are the reverse proxy's job (see docs/deployment.md).
+func newHTTPServer(cfg config.Config, addr string, wgService *wireguard.WireGuardService, m *metrics.Metrics) *http.Server {
+	return &http.Server{
 		Addr:              addr,
-		Handler:           server.NewRouter(ctx, cfg.APIKey, cfg.AllowedNets, cfg.TrustedProxies, wgService, m, debug),
+		Handler:           server.NewRouter(cfg.APIKey, wgService, m),
 		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       120 * time.Second,
+		// The API needs a few short headers; Go's default allows 1 MB.
+		MaxHeaderBytes: 16 << 10,
+		ReadTimeout:    30 * time.Second,
+		WriteTimeout:   30 * time.Second,
+		IdleTimeout:    120 * time.Second,
 	}
-	if cfg.TLSEnabled() {
-		srv.TLSConfig = &tls.Config{
-			MinVersion: tls.VersionTLS12,
-			// Restrict TLS 1.2 to ECDHE+AEAD ciphers only (forward secrecy + authenticated encryption).
-			// TLS 1.3 cipher suites are not configurable in Go and are always secure.
-			CipherSuites: []uint16{
-				tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-				tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-				tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
-				tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
-			},
-		}
-	}
-	return srv
-}
-
-func runServer(cfg config.Config, srv *http.Server) error {
-	if cfg.TLSEnabled() {
-		return srv.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile)
-	}
-	return srv.ListenAndServe()
 }
 
 func handleInit(cfg config.Config, args []string) (bool, error) {

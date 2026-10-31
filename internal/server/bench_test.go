@@ -36,9 +36,9 @@ func init() {
 
 func newBenchRouter(svc mockWGService) *gin.Engine {
 	r := gin.New()
-	r.POST(benchPeersPath, apiKeyMiddleware(testAPIKey), createPeerHandler(svc, nil, false))
-	r.GET(benchPeersPath, apiKeyMiddleware(testAPIKey), listPeersHandler(svc, false))
-	r.GET(benchPeersPath+"/:peerId", apiKeyMiddleware(testAPIKey), getPeerHandler(svc, false))
+	r.POST(benchPeersPath, apiKeyMiddleware(testAPIKey), createPeerHandler(svc, nil))
+	r.GET(benchPeersPath, apiKeyMiddleware(testAPIKey), listPeersHandler(svc))
+	r.GET(benchPeersPath+"/:peerId", apiKeyMiddleware(testAPIKey), getPeerHandler(svc))
 	return r
 }
 
@@ -109,15 +109,13 @@ func BenchmarkCreatePeerHandler(b *testing.B) {
 
 func BenchmarkGetPeerHandler(b *testing.B) {
 	detail := &wireguard.PeerDetail{
-		PeerListItem: wireguard.PeerListItem{
-			PeerID:          benchPeerID,
-			AllowedIPs:      []string{benchAllowedIP},
-			AddressFamilies: []string{"IPv4"},
-			PublicKey:       "pk",
-			CreatedAt:       time.Now().UTC().Format(time.RFC3339),
-		},
-		ReceiveBytes:  1024,
-		TransmitBytes: 2048,
+		PeerID:          benchPeerID,
+		AllowedIPs:      []string{benchAllowedIP},
+		AddressFamilies: []string{"IPv4"},
+		PublicKey:       "pk",
+		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
+		ReceiveBytes:    1024,
+		TransmitBytes:   2048,
 	}
 	svc := mockWGService{
 		getPeerFunc: func(_ string) (*wireguard.PeerDetail, error) { return detail, nil },
@@ -172,15 +170,13 @@ func BenchmarkListPeersHandlerParallel(b *testing.B) {
 
 func BenchmarkGetPeerHandlerParallel(b *testing.B) {
 	detail := &wireguard.PeerDetail{
-		PeerListItem: wireguard.PeerListItem{
-			PeerID:          benchPeerID,
-			AllowedIPs:      []string{benchAllowedIP},
-			AddressFamilies: []string{"IPv4"},
-			PublicKey:       "pk",
-			CreatedAt:       time.Now().UTC().Format(time.RFC3339),
-		},
-		ReceiveBytes:  1024,
-		TransmitBytes: 2048,
+		PeerID:          benchPeerID,
+		AllowedIPs:      []string{benchAllowedIP},
+		AddressFamilies: []string{"IPv4"},
+		PublicKey:       "pk",
+		CreatedAt:       time.Now().UTC().Format(time.RFC3339),
+		ReceiveBytes:    1024,
+		TransmitBytes:   2048,
 	}
 	svc := mockWGService{
 		getPeerFunc: func(_ string) (*wireguard.PeerDetail, error) { return detail, nil },

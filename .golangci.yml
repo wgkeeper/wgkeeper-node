@@ -15,6 +15,11 @@ linters:
     - unconvert
     - misspell
     - unparam
+    - modernize
+    - gocritic
+    - usetesting
+    - nilnil
+    - sloglint
 
   settings:
     errcheck:
@@ -22,6 +27,9 @@ linters:
       check-blank: true
     revive:
       severity: warning
+    sloglint:
+      # Log keys are snake_case (request_id, peer_id) so log queries stay predictable.
+      key-naming-case: snake
   exclusions:
     rules:
       - path: '.*_test\.go$'
@@ -29,6 +37,7 @@ linters:
           - errcheck
           - gosec
           - noctx
+          - nilnil
 
 formatters:
   enable:

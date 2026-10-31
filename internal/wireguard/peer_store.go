@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -35,6 +35,10 @@ type peerRecordStored struct {
 }
 
 var peersBucket = []byte("peers")
+
+// ErrStoreClosed is returned by persist calls after Close, so a write that
+// races shutdown fails loudly instead of looking like a successful no-op.
+var ErrStoreClosed = errors.New("peer store is closed")
 
 func storedToRecord(s peerRecordStored) (PeerRecord, error) {
 	if strings.TrimSpace(s.PeerID) == "" {
@@ -95,7 +99,8 @@ type PeerStore struct {
 	saveMu     sync.Mutex // serializes bbolt writes
 	peers      map[string]PeerRecord
 	sortedKeys []peerSortKey // maintained in (CreatedAt asc, PeerID asc) order
-	db         *bolt.DB      // nil = in-memory only; open for the lifetime of the store
+	db         *bolt.DB      // nil = in-memory only (tests); open for the lifetime of the store
+	closed     bool          // set by Close; guarded by saveMu
 }
 
 func NewPeerStore() *PeerStore {
@@ -139,6 +144,30 @@ func (s *PeerStore) Delete(peerID string) {
 	}
 	delete(s.peers, peerID)
 	s.removeSortedKey(peerSortKey{rec.PeerID, rec.CreatedAt})
+}
+
+// DeleteBatch removes several peers in one pass over the sorted index, so
+// expiring k of n peers costs O(n) instead of O(k·n).
+func (s *PeerStore) DeleteBatch(peerIDs ...string) {
+	if len(peerIDs) == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	drop := make(map[string]struct{}, len(peerIDs))
+	for _, id := range peerIDs {
+		if _, ok := s.peers[id]; ok {
+			drop[id] = struct{}{}
+			delete(s.peers, id)
+		}
+	}
+	if len(drop) == 0 {
+		return
+	}
+	s.sortedKeys = slices.DeleteFunc(s.sortedKeys, func(k peerSortKey) bool {
+		_, ok := drop[k.peerID]
+		return ok
+	})
 }
 
 // insertSorted inserts key into sortedKeys at the correct position.
@@ -250,23 +279,12 @@ func (s *PeerStore) OpenFile(path string) error {
 	return nil
 }
 
-// OpenFileIfExists is like OpenFile but returns nil without opening if the file
-// does not exist.
-func (s *PeerStore) OpenFileIfExists(path string) error {
-	if _, err := os.Stat(path); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return err
-	}
-	return s.OpenFile(path)
-}
-
 // Close closes the underlying bbolt DB. Safe to call when no DB is open.
 // Serialized with saveMu so it cannot race with concurrent persist calls.
 func (s *PeerStore) Close() error {
 	s.saveMu.Lock()
 	defer s.saveMu.Unlock()
+	s.closed = true
 	if s.db == nil {
 		return nil
 	}
@@ -279,6 +297,9 @@ func (s *PeerStore) Close() error {
 func (s *PeerStore) PersistPut(record PeerRecord) error {
 	s.saveMu.Lock()
 	defer s.saveMu.Unlock()
+	if s.closed {
+		return ErrStoreClosed
+	}
 	if s.db == nil {
 		return nil
 	}
@@ -307,6 +328,9 @@ func (s *PeerStore) PersistDeleteBatch(peerIDs ...string) error {
 	}
 	s.saveMu.Lock()
 	defer s.saveMu.Unlock()
+	if s.closed {
+		return ErrStoreClosed
+	}
 	if s.db == nil {
 		return nil
 	}

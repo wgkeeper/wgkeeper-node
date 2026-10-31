@@ -1,0 +1,78 @@
+# Example Prometheus alerting rules for wgkeeper-node.
+# Loaded by examples/prometheus/prometheus.yml (rule_files). Tune the
+# thresholds and "for" durations to your fleet.
+
+groups:
+  - name: wgkeeper
+    rules:
+      - alert: WgkeeperNodeDown
+        expr: up{job="wgkeeper"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "wgkeeper node {{ $labels.instance }} is not being scraped"
+          description: "The node is down, /metrics is unreachable, or the bearer token is wrong."
+
+      - alert: WgkeeperPersistRollbackFailed
+        expr: increase(wgkeeper_persist_rollback_failed_total[10m]) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Peer store and WireGuard device disagree on {{ $labels.instance }}"
+          description: "A device change failed and undoing the matching peer store write failed too. The next restart applies the stored state; check the node log for rollback_error."
+
+      - alert: WgkeeperSubnetNearlyFull
+        expr: |
+          sum by (instance) (wgkeeper_peers{state="issued"})
+            / clamp_min(sum by (instance) (wgkeeper_peers{state="possible"}), 1) > 0.9
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Peer subnet on {{ $labels.instance }} is over 90% used"
+          description: "When it is full, creating peers fails with 409 no_available_ip. Use a larger subnet or move peers to another node."
+
+      - alert: WgkeeperSubnetFull
+        expr: |
+          sum by (instance) (wgkeeper_peers{state="issued"})
+            >= sum by (instance) (wgkeeper_peers{state="possible"})
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Peer subnet on {{ $labels.instance }} is full"
+          description: "New peers can't be created on this node (409 no_available_ip)."
+
+      - alert: WgkeeperPeerOperationErrors
+        expr: |
+          sum by (instance) (
+            rate(wgkeeper_peer_operations_total{result=~"error_persist|error_device|error_internal"}[5m])
+          ) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Peer operations are failing on {{ $labels.instance }}"
+          description: "Create, rotate, delete or expiry fails because of the peer store, the WireGuard device or an internal error. Check the node log by request_id."
+
+      - alert: WgkeeperAPIServerErrors
+        expr: sum by (instance) (rate(wgkeeper_http_requests_total{status_class="5xx"}[5m])) > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "wgkeeper API on {{ $labels.instance }} returns 5xx"
+          description: "Every failed request is logged with its request_id and the error."
+
+      - alert: WgkeeperAPIClientErrorBurst
+        expr: |
+          sum by (instance) (
+            rate(wgkeeper_http_requests_total{status_class="4xx", path!="unmatched"}[5m])
+          ) > 1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Sustained 4xx on the wgkeeper API on {{ $labels.instance }}"
+          description: "Usually an orchestrator misconfiguration (wrong API key, bad requests) or someone probing the API key."

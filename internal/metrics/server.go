@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"errors"
 	"log/slog"
@@ -29,9 +30,11 @@ const (
 // Tight ReadHeader/Read protect against slowloris from any TCP peer.
 const (
 	readHeaderTimeout = 5 * time.Second
-	readTimeout       = 10 * time.Second
-	writeTimeout      = 30 * time.Second
-	idleTimeout       = 60 * time.Second
+	// maxHeaderBytes is far above what a scrape sends and far below Go's 1 MB default.
+	maxHeaderBytes = 16 << 10
+	readTimeout    = 10 * time.Second
+	writeTimeout   = 30 * time.Second
+	idleTimeout    = 60 * time.Second
 )
 
 // NewServer builds the HTTP server that serves the /metrics endpoint.
@@ -48,14 +51,15 @@ func NewServer(addr, token string, m *Metrics) *http.Server {
 			ErrorHandling: promhttp.ContinueOnError,
 		}),
 		methodOnly(http.MethodGet),
-		bearerAuth(token),
 		rateLimit(rate.NewLimiter(metricsRateLimit, metricsBurst)),
+		bearerAuth(token),
 	))
 
 	return &http.Server{
 		Addr:              addr,
 		Handler:           mux,
 		ReadHeaderTimeout: readHeaderTimeout,
+		MaxHeaderBytes:    maxHeaderBytes,
 		ReadTimeout:       readTimeout,
 		WriteTimeout:      writeTimeout,
 		IdleTimeout:       idleTimeout,
@@ -88,9 +92,10 @@ func Run(ctx context.Context, srv *http.Server) error {
 	}
 }
 
-// chain composes middleware right-to-left so the listed order in NewServer
-// matches the request path order at runtime: rateLimit → bearerAuth →
-// methodOnly → handler.
+// chain wraps h in each middleware in turn, so the last one listed runs first.
+// In NewServer that is bearerAuth → rateLimit → methodOnly → handler: auth
+// comes before the rate limit, so unauthenticated requests can't use up the
+// budget and lock the real scraper out.
 func chain(h http.Handler, mws ...func(http.Handler) http.Handler) http.Handler {
 	for _, mw := range mws {
 		h = mw(h)
@@ -124,6 +129,10 @@ func methodOnly(method string) func(http.Handler) http.Handler {
 // through.
 func bearerAuth(token string) func(http.Handler) http.Handler {
 	want := []byte(token)
+	wantSum := sha256.Sum256(want)
+	// Rejections are logged at most once a second (burst 5), so a flood of
+	// bad requests can't flood the log.
+	logLimit := rate.NewLimiter(1, 5)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if len(want) == 0 {
@@ -138,15 +147,20 @@ func bearerAuth(token string) func(http.Handler) http.Handler {
 			if strings.HasPrefix(h, prefix) {
 				got = h[len(prefix):]
 			}
-			if subtle.ConstantTimeCompare([]byte(got), want) != 1 {
+			// Compare digests: ConstantTimeCompare returns early on a length
+			// mismatch, which would leak the token length.
+			gotSum := sha256.Sum256([]byte(got))
+			if subtle.ConstantTimeCompare(gotSum[:], wantSum[:]) != 1 {
 				// client_ip is the TCP RemoteAddr (set by Go's net stack from
 				// the accepted socket), not a request header — not attacker
 				// controlled. slog handlers escape values regardless.
-				// #nosec G706 -- RemoteAddr-derived, escaped by slog handler.
-				slog.Warn("metrics auth rejected",
-					"client_ip", clientIP(r),
-					"path", metricsPath,
-				)
+				if logLimit.Allow() {
+					// #nosec G706 -- RemoteAddr-derived, escaped by slog handler.
+					slog.Warn("metrics auth rejected",
+						"client_ip", clientIP(r),
+						"path", metricsPath,
+					)
+				}
 				w.Header().Set("WWW-Authenticate", `Bearer realm="metrics"`)
 				w.WriteHeader(http.StatusUnauthorized)
 				return

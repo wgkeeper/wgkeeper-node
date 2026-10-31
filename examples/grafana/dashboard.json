@@ -1100,212 +1100,6 @@
       }
     },
     {
-      "id": 145,
-      "type": "row",
-      "title": "Per-peer (only when metrics.per_peer enabled)",
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 46
-      },
-      "panels": []
-    },
-    {
-      "id": 70,
-      "type": "table",
-      "title": "Top peers by total traffic",
-      "description": "Top peers ranked by total bytes since interface bring-up. Click any row to drill down to per-peer rate history in Prometheus Explore.",
-      "gridPos": {
-        "h": 10,
-        "w": 16,
-        "x": 0,
-        "y": 47
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "expr": "topk(20, wgkeeper_peer_rx_bytes_total{instance=\"$instance\"})",
-          "refId": "rxtot",
-          "format": "table",
-          "instant": true
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "expr": "wgkeeper_peer_tx_bytes_total{instance=\"$instance\"}",
-          "refId": "txtot",
-          "format": "table",
-          "instant": true
-        }
-      ],
-      "transformations": [
-        {
-          "id": "merge",
-          "options": {}
-        },
-        {
-          "id": "groupBy",
-          "options": {
-            "fields": {
-              "peer_id": {
-                "operation": "groupby"
-              },
-              "allowed_ip": {
-                "operation": "aggregate",
-                "aggregations": [
-                  "lastNotNull"
-                ]
-              },
-              "Value #rxtot": {
-                "operation": "aggregate",
-                "aggregations": [
-                  "lastNotNull"
-                ]
-              },
-              "Value #txtot": {
-                "operation": "aggregate",
-                "aggregations": [
-                  "lastNotNull"
-                ]
-              }
-            }
-          }
-        },
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {},
-            "renameByName": {
-              "peer_id": "Peer ID",
-              "allowed_ip (lastNotNull)": "IP",
-              "Value #rxtot (lastNotNull)": "RX total",
-              "Value #txtot (lastNotNull)": "TX total"
-            }
-          }
-        },
-        {
-          "id": "sortBy",
-          "options": {
-            "fields": {},
-            "sort": [
-              {
-                "field": "RX total",
-                "desc": true
-              }
-            ]
-          }
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "links": [
-            {
-              "title": "Drill down: peer history",
-              "url": "/explore?left=%7B%22datasource%22%3A%22${DS_PROMETHEUS}%22%2C%22queries%22%3A%5B%7B%22expr%22%3A%22rate(wgkeeper_peer_rx_bytes_total%7Bpeer_id%3D%5C%22${__data.fields.Peer ID}%5C%22%7D%5B5m%5D)*8%22%7D%5D%7D",
-              "targetBlank": true
-            }
-          ]
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "RX total"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "bytes"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "TX total"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "bytes"
-              }
-            ]
-          }
-        ]
-      },
-      "options": {
-        "showHeader": true,
-        "footer": {
-          "show": false
-        }
-      }
-    },
-    {
-      "id": 71,
-      "type": "stat",
-      "title": "Peers capped",
-      "description": "Number of peers excluded from per-peer metrics by the per_peer_max cap. Non-zero means the cap is binding \u2014 operator may need to raise it or accept that quiet peers are invisible to per-peer metrics.",
-      "gridPos": {
-        "h": 10,
-        "w": 8,
-        "x": 16,
-        "y": 47
-      },
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${DS_PROMETHEUS}"
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${DS_PROMETHEUS}"
-          },
-          "expr": "wgkeeper_peers_capped{instance=\"$instance\"}",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 1
-              }
-            ]
-          }
-        }
-      },
-      "options": {
-        "graphMode": "area",
-        "colorMode": "value",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        }
-      }
-    },
-    {
       "id": 150,
       "type": "row",
       "title": "Crash safety (write-ahead persist)",
@@ -1314,7 +1108,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 57
+        "y": 46
       },
       "panels": []
     },
@@ -1327,7 +1121,7 @@
         "h": 4,
         "w": 8,
         "x": 0,
-        "y": 58
+        "y": 47
       },
       "datasource": {
         "type": "prometheus",
@@ -1381,7 +1175,7 @@
         "h": 4,
         "w": 16,
         "x": 8,
-        "y": 58
+        "y": 47
       },
       "datasource": {
         "type": "prometheus",
@@ -1430,7 +1224,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 62
+        "y": 51
       },
       "panels": []
     },
@@ -1443,7 +1237,7 @@
         "h": 4,
         "w": 8,
         "x": 0,
-        "y": 63
+        "y": 52
       },
       "datasource": {
         "type": "prometheus",
@@ -1490,7 +1284,7 @@
         "h": 4,
         "w": 8,
         "x": 8,
-        "y": 63
+        "y": 52
       },
       "datasource": {
         "type": "prometheus",
@@ -1536,7 +1330,7 @@
         "h": 4,
         "w": 8,
         "x": 16,
-        "y": 63
+        "y": 52
       },
       "datasource": {
         "type": "prometheus",

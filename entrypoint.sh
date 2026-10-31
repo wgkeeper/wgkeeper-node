@@ -24,7 +24,8 @@ fi
 
 # --- WG UP WITH CHECK ---
 echo "time=$(date -u +"$TIMESTAMP_FMT") level=INFO msg=\"bring up wireguard\""
-if wg-quick up "$WG_CONF_PATH" >/dev/null 2>&1; then
+# wg-quick output goes to stderr so a failure shows its cause in the container log.
+if wg-quick up "$WG_CONF_PATH" >&2; then
     echo "time=$(date -u +"$TIMESTAMP_FMT") level=INFO msg=\"wireguard started\""
 else
     echo "time=$(date -u +"$TIMESTAMP_FMT") level=ERROR msg=\"wireguard start failed\"" >&2

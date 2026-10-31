@@ -29,8 +29,7 @@ func bodyLimitMiddleware(maxBytes int64) gin.HandlerFunc {
 		case http.MethodPost, http.MethodPut, http.MethodPatch:
 			buf, err := io.ReadAll(c.Request.Body)
 			if err != nil {
-				var maxBytesErr *http.MaxBytesError
-				if errors.As(err, &maxBytesErr) {
+				if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 					c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{
 						"error": "request body too large",
 						"code":  "body_too_large",

@@ -1,12 +1,13 @@
 package server
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/wgkeeper/wgkeeper-node/internal/metrics"
@@ -22,7 +23,7 @@ const (
 )
 
 type peerRequest struct {
-	PeerID          string   `json:"peerId" binding:"required"`
+	PeerID          string   `json:"peerId"`
 	ExpiresAt       *string  `json:"expiresAt,omitempty"`       // RFC3339; omit = permanent peer
 	AddressFamilies []string `json:"addressFamilies,omitempty"` // optional: ["IPv4"], ["IPv6"], or ["IPv4","IPv6"]; omit = all node supports
 }
@@ -50,11 +51,12 @@ func healthHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, HealthResponse{Status: "ok"})
 }
 
-// readinessHandler checks whether core WireGuard dependencies are healthy enough to serve traffic.
-// Currently it treats successful Stats() call as readiness signal.
-func readinessHandler(wgService statsProvider) gin.HandlerFunc {
+// readinessHandler reports whether the WireGuard device can be read. It uses
+// the cached device read, not the full Stats computation, because health
+// checks call it every few seconds.
+func readinessHandler(wgService readinessProvider) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if _, err := wgService.Stats(); err != nil {
+		if err := wgService.Ready(); err != nil {
 			c.JSON(http.StatusServiceUnavailable, ReadinessResponse{
 				Status: "unhealthy",
 				Reason: "wireguard_unavailable",
@@ -65,11 +67,11 @@ func readinessHandler(wgService statsProvider) gin.HandlerFunc {
 	}
 }
 
-func statsHandler(wgService statsProvider, debug bool) gin.HandlerFunc {
+func statsHandler(wgService statsProvider) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		stats, err := wgService.Stats()
 		if err != nil {
-			writeError(c, http.StatusInternalServerError, "stats unavailable", "stats_unavailable", debug, err)
+			writeError(c, http.StatusInternalServerError, "stats unavailable", "stats_unavailable", err)
 			return
 		}
 
@@ -77,20 +79,24 @@ func statsHandler(wgService statsProvider, debug bool) gin.HandlerFunc {
 	}
 }
 
-func createPeerHandler(wgService wgPeerService, m *metrics.Metrics, debug bool) gin.HandlerFunc {
+func createPeerHandler(wgService wgPeerService, m *metrics.Metrics) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req peerRequest
-		if err := c.ShouldBindJSON(&req); err != nil {
-			writeError(c, http.StatusBadRequest, "invalid json body", "invalid_json", debug, err)
+		if err := decodeStrictJSON(c.Request.Body, &req); err != nil {
+			if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+				writeError(c, http.StatusRequestEntityTooLarge, "request body too large", "body_too_large", nil)
+				return
+			}
+			writeError(c, http.StatusBadRequest, "invalid json body", "invalid_json", err)
 			return
 		}
 		if !IsUUIDv4(req.PeerID) {
-			writeError(c, http.StatusBadRequest, errMsgPeerIDMustBeUUIDv4, "invalid_peer_id", debug, nil)
+			writeError(c, http.StatusBadRequest, errMsgPeerIDMustBeUUIDv4, "invalid_peer_id", nil)
 			return
 		}
 		expiresAt, err := parseExpiresAt(req.ExpiresAt)
 		if err != nil {
-			writeError(c, http.StatusBadRequest, err.Error(), "invalid_expires_at", debug, err)
+			writeError(c, http.StatusBadRequest, err.Error(), "invalid_expires_at", err)
 			return
 		}
 
@@ -105,25 +111,13 @@ func createPeerHandler(wgService wgPeerService, m *metrics.Metrics, debug bool) 
 		observeOp(m, op, start, err)
 		if err != nil {
 			status, message, reason := peerError(err)
-			slog.Error("peer create failed",
-				"reason", reason,
-				"peerId", req.PeerID,
-				"client_ip", c.ClientIP(),
-				"request_id", GetRequestIDFromContext(c.Request.Context()),
-			)
-			writeError(c, status, message, reason, debug, err)
+			writeError(c, status, message, reason, err, "peer_id", req.PeerID)
 			return
 		}
 
 		serverPublicKey, serverListenPort, err := wgService.ServerInfo()
 		if err != nil {
-			slog.Error("peer create failed",
-				"reason", "server_info_unavailable",
-				"peerId", req.PeerID,
-				"client_ip", c.ClientIP(),
-				"request_id", GetRequestIDFromContext(c.Request.Context()),
-			)
-			writeError(c, http.StatusInternalServerError, "server public key unavailable", "server_info_unavailable", debug, err)
+			writeError(c, http.StatusInternalServerError, "server public key unavailable", "server_info_unavailable", err, "peer_id", req.PeerID)
 			return
 		}
 
@@ -132,12 +126,13 @@ func createPeerHandler(wgService wgPeerService, m *metrics.Metrics, debug bool) 
 			event = "audit.peer_rotated"
 		}
 		slog.Info(event,
-			"peerId", req.PeerID,
-			"publicKey", info.PublicKey,
-			"allowedIPs", info.AllowedIPs,
-			"addressFamilies", info.AddressFamilies,
-			"expiresAt", formatExpiresAtForLog(expiresAt),
+			"peer_id", req.PeerID,
+			"public_key", info.PublicKey,
+			"allowed_ips", info.AllowedIPs,
+			"address_families", info.AddressFamilies,
+			"expires_at", formatExpiresAtForLog(expiresAt),
 			"client_ip", c.ClientIP(),
+			"forwarded_for", forwardedFor(c.Request),
 			"request_id", GetRequestIDFromContext(c.Request.Context()),
 		)
 		// Private and preshared keys must never be cached by proxies or browsers.
@@ -160,11 +155,11 @@ func createPeerHandler(wgService wgPeerService, m *metrics.Metrics, debug bool) 
 	}
 }
 
-func deletePeerHandler(wgService wgPeerService, m *metrics.Metrics, debug bool) gin.HandlerFunc {
+func deletePeerHandler(wgService wgPeerService, m *metrics.Metrics) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		peerID := c.Param("peerId")
 		if !IsUUIDv4(peerID) {
-			writeError(c, http.StatusBadRequest, errMsgPeerIDMustBeUUIDv4, "invalid_peer_id", debug, nil)
+			writeError(c, http.StatusBadRequest, errMsgPeerIDMustBeUUIDv4, "invalid_peer_id", nil)
 			return
 		}
 
@@ -173,36 +168,31 @@ func deletePeerHandler(wgService wgPeerService, m *metrics.Metrics, debug bool) 
 		observeOp(m, metrics.OpDelete, start, err)
 		if err != nil {
 			status, message, reason := peerError(err)
-			slog.Error("peer delete failed",
-				"reason", reason,
-				"peerId", peerID,
-				"client_ip", c.ClientIP(),
-				"request_id", GetRequestIDFromContext(c.Request.Context()),
-			)
-			writeError(c, status, message, reason, debug, err)
+			writeError(c, status, message, reason, err, "peer_id", peerID)
 			return
 		}
 
 		slog.Info("audit.peer_deleted",
-			"peerId", peerID,
-			"allowedIPs", allowedIPs,
+			"peer_id", peerID,
+			"allowed_ips", allowedIPs,
 			"client_ip", c.ClientIP(),
+			"forwarded_for", forwardedFor(c.Request),
 			"request_id", GetRequestIDFromContext(c.Request.Context()),
 		)
 		c.JSON(http.StatusOK, DeletePeerResponse{Status: "ok"})
 	}
 }
 
-func listPeersHandler(wgService wgPeersListProvider, debug bool) gin.HandlerFunc {
+func listPeersHandler(wgService wgPeersListProvider) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if err := validatePaginationParams(c.Query("offset"), c.Query("limit")); err != nil {
-			writeError(c, http.StatusBadRequest, err.Error(), "invalid_pagination", debug, nil)
+			writeError(c, http.StatusBadRequest, err.Error(), "invalid_pagination", nil)
 			return
 		}
 		offset, limit := parsePaginationParams(c.Query("offset"), c.Query("limit"))
 		list, total, err := wgService.ListPeers(offset, limit)
 		if err != nil {
-			writeError(c, http.StatusInternalServerError, "peers list unavailable", "peers_list_unavailable", debug, err)
+			writeError(c, http.StatusInternalServerError, "peers list unavailable", "peers_list_unavailable", err)
 			return
 		}
 		if list == nil {
@@ -212,10 +202,7 @@ func listPeersHandler(wgService wgPeersListProvider, debug bool) gin.HandlerFunc
 		hasNext := offset+len(list) < total
 		var prevOffset, nextOffset *int
 		if hasPrev {
-			prev := offset - limit
-			if prev < 0 {
-				prev = 0
-			}
+			prev := max(offset-limit, 0)
 			prevOffset = &prev
 		}
 		if hasNext {
@@ -271,17 +258,17 @@ func parsePaginationParams(offsetStr, limitStr string) (offset, limit int) {
 	return offset, limit
 }
 
-func getPeerHandler(wgService wgPeerDetailProvider, debug bool) gin.HandlerFunc {
+func getPeerHandler(wgService wgPeerDetailProvider) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		peerID := c.Param("peerId")
 		if !IsUUIDv4(peerID) {
-			writeError(c, http.StatusBadRequest, errMsgPeerIDMustBeUUIDv4, "invalid_peer_id", debug, nil)
+			writeError(c, http.StatusBadRequest, errMsgPeerIDMustBeUUIDv4, "invalid_peer_id", nil)
 			return
 		}
 		detail, err := wgService.GetPeer(peerID)
 		if err != nil {
 			status, message, reason := peerError(err)
-			writeError(c, status, message, reason, debug, err)
+			writeError(c, status, message, reason, err)
 			return
 		}
 		c.JSON(http.StatusOK, detail)
@@ -320,12 +307,12 @@ func resultLabel(err error) string {
 		return metrics.ResultErrorUnsupportedFam
 	case errors.Is(err, wireguard.ErrPeerNotFound):
 		return metrics.ResultErrorNotFound
-	case strings.Contains(err.Error(), "save peer store"):
-		// Persist failures wrap with this prefix in wireguard.errSavePeerStoreFmt.
-		// Substring match keeps this contract loose: a sentinel error would be
-		// stricter, but the prefix is specific enough that false positives are
-		// effectively impossible.
+	case errors.Is(err, wireguard.ErrInvalidAddressFamily):
+		return metrics.ResultErrorUnsupportedFam
+	case errors.Is(err, wireguard.ErrPeerStore):
 		return metrics.ResultErrorPersist
+	case errors.Is(err, wireguard.ErrDevice):
+		return metrics.ResultErrorDevice
 	}
 	return metrics.ResultErrorInternal
 }
@@ -334,7 +321,7 @@ func resultLabel(err error) string {
 // If provided, must be in the future; otherwise returns error.
 func parseExpiresAt(s *string) (*time.Time, error) {
 	if s == nil || *s == "" {
-		return nil, nil
+		return nil, nil //nolint:nilnil // no expiry is a valid result, not an error
 	}
 	t, err := time.Parse(time.RFC3339, *s)
 	if err != nil {
@@ -355,6 +342,18 @@ func peerError(err error) (int, string, string) {
 	if errors.Is(err, wireguard.ErrNoAvailableIP) {
 		return http.StatusConflict, "no available ip addresses", "no_available_ip"
 	}
+	if errors.Is(err, wireguard.ErrDeviceTimeout) {
+		return http.StatusServiceUnavailable, "wireguard device did not respond; the change is kept and will reach the device when it recovers, retry the request", "device_timeout"
+	}
+	if errors.Is(err, wireguard.ErrDeviceBusy) {
+		return http.StatusServiceUnavailable, "wireguard device is busy; nothing was changed, retry the request", "device_busy"
+	}
+	if errors.Is(err, wireguard.ErrPeerExpired) {
+		return http.StatusConflict, "peer has expired; pass a future expiresAt to renew it", "peer_expired"
+	}
+	if errors.Is(err, wireguard.ErrInvalidAddressFamily) {
+		return http.StatusBadRequest, "addressFamilies may only contain IPv4 and IPv6, each at most once", "invalid_address_family"
+	}
 	if errors.Is(err, wireguard.ErrUnsupportedAddressFamily) {
 		return http.StatusBadRequest, "requested address family is not supported by this node", "unsupported_address_family"
 	}
@@ -362,13 +361,49 @@ func peerError(err error) (int, string, string) {
 	return http.StatusInternalServerError, "wireguard operation failed", "wireguard_error"
 }
 
-// writeError sends a JSON error. When debug is true, err.Error() is included as "detail"; set debug=false in production to avoid leaking internal details.
-func writeError(c *gin.Context, status int, message, code string, debug bool, err error) {
-	out := gin.H{"error": message, "code": code}
-	if debug && err != nil {
-		out["detail"] = err.Error()
+// decodeStrictJSON decodes exactly one JSON object into v. Unknown fields and
+// trailing data are errors: a misspelled field such as "expires_at" would
+// otherwise be dropped and, for expiresAt, issue a peer that never expires.
+func decodeStrictJSON(body io.Reader, v any) error {
+	if body == nil {
+		return errors.New("empty body")
 	}
-	c.JSON(status, out)
+	dec := json.NewDecoder(body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
+			return err
+		}
+		return errors.New("unexpected data after the JSON object")
+	}
+	return nil
+}
+
+// writeError sends a JSON error. Internal details never reach the client:
+// when err is set it is logged with the request ID and attrs instead, so the
+// response's X-Request-Id leads to the full error in the node's log.
+func writeError(c *gin.Context, status int, message, code string, err error, attrs ...any) {
+	if err != nil {
+		level := slog.LevelWarn
+		if status >= http.StatusInternalServerError {
+			level = slog.LevelError
+		}
+		args := append([]any{
+			"request_id", GetRequestID(c),
+			"method", c.Request.Method,
+			"path", c.FullPath(),
+			"status", status,
+			"code", code,
+			"client_ip", c.ClientIP(),
+			"forwarded_for", forwardedFor(c.Request),
+			"error", err,
+		}, attrs...)
+		slog.Log(c.Request.Context(), level, "request failed", args...)
+	}
+	c.JSON(status, gin.H{"error": message, "code": code})
 }
 
 type wgPeerService interface {
@@ -381,6 +416,10 @@ type wgPeerService interface {
 // statsProvider provides WireGuard stats (single-method interface naming).
 type statsProvider interface {
 	Stats() (wireguard.Stats, error)
+}
+
+type readinessProvider interface {
+	Ready() error
 }
 
 type wgPeersListProvider interface {

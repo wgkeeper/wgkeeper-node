@@ -11,6 +11,11 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request cancels the run for the previous one; main and tags always finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   SERVICE_NAME: node
   REGISTRY: ghcr.io
@@ -18,27 +23,32 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       pull-requests: read
-      checks: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
+
+      - name: Check go.mod and go.sum are tidy
+        run: go mod tidy -diff
 
       - name: Run go vet
         run: go vet ./...
 
       - name: Run Go tests
-        run: go test -coverprofile=coverage.txt ./...
+        run: go test -race -coverprofile=coverage.txt ./...
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.txt
@@ -48,34 +58,86 @@ jobs:
         uses: golang/govulncheck-action@v1
         with:
           repo-checkout: false
+          # Scan against the Go version we ship (go.mod), not latest stable.
+          go-version-input: ""
+          go-version-file: go.mod
           go-package: ./...
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v9
+        with:
+          # Pinned so new linter releases don't break CI unexpectedly; bump manually.
+          version: v2.15.0
+
+  # Runs the image with a real WireGuard interface and a client container:
+  # peer lifecycle, peer isolation and restart (see test/e2e/run.sh).
+  e2e:
+    name: End-to-end
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Build image
+        run: docker build -t wgkeeper-node:e2e .
+
+      - name: Check shell scripts
+        run: shellcheck scripts/install.sh test/e2e/run.sh entrypoint.sh
+
+      - name: Run end-to-end test
+        env:
+          E2E_IMAGE: wgkeeper-node:e2e
+        run: test/e2e/run.sh
+
+      # Installs with the image built above and the files from this checkout,
+      # then runs the installer again and checks the API key survives it.
+      - name: Test install script
+        env:
+          WGKEEPER_IMAGE: wgkeeper-node:e2e
+          WGKEEPER_FILES: ${{ github.workspace }}
+        run: |
+          dir="$RUNNER_TEMP/wgkeeper"
+          api_key() { sudo sed -n 's/^ *api_key: *"\(.*\)"$/\1/p' "$dir/config.yaml"; }
+          sudo -E bash scripts/install.sh --version 0.0.0-ci --dir "$dir"
+          key="$(api_key)"
+          curl -fsS -H "X-API-Key: $key" http://127.0.0.1:51821/stats
+          sudo -E bash scripts/install.sh --version 0.0.0-ci --dir "$dir"
+          test "$(api_key)" = "$key"
+          curl -fsS http://127.0.0.1:51821/readyz
 
   build_push:
     name: Build & Push Image
-    needs: test
+    needs: [test, e2e]
     if: >
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
+      id-token: write # sign the provenance attestation (Sigstore)
+      attestations: write
+      artifact-metadata: write
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Prepare image name (lowercase)
         run: |
-          OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          OWNER_LC=$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
           echo "IMAGE=${REGISTRY}/${OWNER_LC}/${SERVICE_NAME}" >> $GITHUB_ENV
 
       - name: Set VERSION for build
         id: version
         run: |
-          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
           else
             SHORT_SHA=$(echo "$GITHUB_SHA" | cut -c1-7)
@@ -102,18 +164,19 @@ jobs:
             # ---------- TEST/NIGHTLY (push to main) ----------
             type=raw,value=edge,enable=${{ github.ref == 'refs/heads/main' }}
             type=sha,format=short,prefix=sha-,enable=${{ github.ref == 'refs/heads/main' }}
-            
+
             # ---------- RELEASE (push tag vX.Y.Z or vX.Y.Z-rc.N) ----------
             type=semver,pattern={{version}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            
+
             # ---------- latest only for stable (no '-') ----------
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref, '-') }}
-            
+
             # (temporarily disabled)
             # type=semver,pattern={{major}}.{{minor}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
             # type=semver,pattern={{major}},enable=${{ startsWith(github.ref, 'refs/tags/v') }}
 
       - name: Build & Push
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -123,5 +186,70 @@ jobs:
             VERSION=${{ steps.version.outputs.VERSION }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          provenance: mode=max
+          sbom: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Verify with: gh attestation verify oci://ghcr.io/wgkeeper/node:<tag> --owner wgkeeper
+      - name: Attest build provenance
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  release:
+    name: GitHub Release
+    needs: build_push
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # Notes are the "## [X.Y.Z]" section of CHANGELOG.md. A pre-release
+      # (vX.Y.Z-rc.N) without its own section uses "## [Unreleased]", so release
+      # candidates carry the notes of the release they lead to. Without either,
+      # GitHub generates notes from commits.
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          version="${tag#v}"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $tag already exists, leaving it as is."
+            exit 0
+          fi
+          section() {
+            local name="$1"
+            awk -v head="## [$name]" '
+              index($0, head) == 1 { found = 1; next }
+              found && /^## / { exit }
+              found && !started && $0 == "" { next }
+              found { started = 1; print }
+            ' CHANGELOG.md
+          }
+          section "$version" > "$RUNNER_TEMP/notes.md"
+          if [[ ! -s "$RUNNER_TEMP/notes.md" && "$version" == *-* ]]; then
+            { echo "Release candidate for ${version%%-*}. Not for production yet; please report problems in an issue."
+              echo
+              section "Unreleased"
+            } > "$RUNNER_TEMP/notes.md"
+          fi
+          args=(--repo "$GITHUB_REPOSITORY" --title "$tag" --verify-tag)
+          if [[ -s "$RUNNER_TEMP/notes.md" ]]; then
+            args+=(--notes-file "$RUNNER_TEMP/notes.md")
+          else
+            echo "::warning::No [$version] section in CHANGELOG.md, using generated notes."
+            args+=(--generate-notes)
+          fi
+          if [[ "$version" == *-* ]]; then
+            args+=(--prerelease)
+          fi
+          gh release create "$tag" "${args[@]}"

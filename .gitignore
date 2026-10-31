@@ -30,6 +30,10 @@ go.work.sum
 # Editor/IDE
 .idea/
 .vscode/
+.agents
+.claude
+skills-lock.json
+/agent/
 
 # OS
 .DS_Store
@@ -37,7 +41,8 @@ go.work.sum
 # local config
 /config.yaml
 
-# runtime WG configs
+# runtime WG configs (server private key) and the peer store (preshared keys)
 /wireguard/
+/data/
 
 .cache

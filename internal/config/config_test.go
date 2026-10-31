@@ -1,9 +1,9 @@
 package config
 
 import (
-	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -156,14 +156,19 @@ wireguard:
 	}
 }
 
-func TestLoadConfigTrustedProxies(t *testing.T) {
-	path := writeConfigFile(t, `
+func TestLoadConfigRejectsRemovedServerKeys(t *testing.T) {
+	cases := map[string]string{
+		"tls_cert":        "  tls_cert: \"/etc/certs/server.pem\"\n",
+		"tls_key":         "  tls_key: \"/etc/certs/server-key.pem\"\n",
+		"allowed_ips":     "  allowed_ips:\n    - \"10.0.0.1\"\n",
+		"trusted_proxies": "  trusted_proxies:\n    - \"172.18.0.0/16\"\n",
+	}
+	for key, serverLines := range cases {
+		t.Run(key, func(t *testing.T) {
+			path := writeConfigFile(t, `
 server:
   port: "51821"
-  trusted_proxies:
-    - "172.18.0.0/16"
-    - "10.1.2.3"
-auth:
+`+serverLines+`auth:
   api_key: "test-api-key-secure-key-longer!!"
 wireguard:
   interface: "wg0"
@@ -172,60 +177,16 @@ wireguard:
   routing:
     wan_interface: "eth0"
 `)
-	t.Setenv("NODE_CONFIG", path)
+			t.Setenv("NODE_CONFIG", path)
 
-	cfg, err := LoadConfig()
-	if err != nil {
-		t.Fatalf(msgExpectedNoError, err)
-	}
-	if len(cfg.TrustedProxies) != 2 || cfg.TrustedProxies[0] != "172.18.0.0/16" || cfg.TrustedProxies[1] != "10.1.2.3" {
-		t.Fatalf("unexpected trusted proxies: %v", cfg.TrustedProxies)
-	}
-}
-
-func TestLoadConfigTrustedProxiesInvalid(t *testing.T) {
-	path := writeConfigFile(t, `
-server:
-  port: "51821"
-  trusted_proxies:
-    - "not-an-ip"
-auth:
-  api_key: "test-api-key-secure-key-longer!!"
-wireguard:
-  interface: "wg0"
-  subnet: "10.0.0.0/24"
-  listen_port: 51820
-  routing:
-    wan_interface: "eth0"
-`)
-	t.Setenv("NODE_CONFIG", path)
-
-	if _, err := LoadConfig(); err == nil {
-		t.Fatalf("expected error for invalid trusted_proxies entry")
-	}
-}
-
-func TestLoadConfigNoTrustedProxies(t *testing.T) {
-	path := writeConfigFile(t, `
-server:
-  port: "51821"
-auth:
-  api_key: "test-api-key-secure-key-longer!!"
-wireguard:
-  interface: "wg0"
-  subnet: "10.0.0.0/24"
-  listen_port: 51820
-  routing:
-    wan_interface: "eth0"
-`)
-	t.Setenv("NODE_CONFIG", path)
-
-	cfg, err := LoadConfig()
-	if err != nil {
-		t.Fatalf(msgExpectedNoError, err)
-	}
-	if cfg.TrustedProxies != nil {
-		t.Fatalf("expected nil trusted proxies when unset, got %v", cfg.TrustedProxies)
+			_, err := LoadConfig()
+			if err == nil {
+				t.Fatalf("expected error for removed server.%s", key)
+			}
+			if !strings.Contains(err.Error(), "removed in 2.0.0") {
+				t.Fatalf("error should explain the removal, got %v", err)
+			}
+		})
 	}
 }
 
@@ -297,39 +258,14 @@ wireguard:
 	}
 }
 
-func TestLoadConfigMissingInterface(t *testing.T) {
+// TestLoadConfigMinimal checks that a config with only the API key and a
+// subnet starts with the default ports, interface and peer store.
+func TestLoadConfigMinimal(t *testing.T) {
 	path := writeConfigFile(t, `
-server:
-  port: "51821"
 auth:
   api_key: "test-api-key-secure-key-longer!!"
 wireguard:
-  interface: ""
   subnet: "10.0.0.0/24"
-  listen_port: 51820
-`)
-	t.Setenv("NODE_CONFIG", path)
-
-	if _, err := LoadConfig(); err == nil {
-		t.Fatalf("expected error for missing interface")
-	}
-}
-
-func TestLoadConfigTLSEnabled(t *testing.T) {
-	path := writeConfigFile(t, `
-server:
-  port: "51821"
-  tls_cert: "/etc/certs/server.pem"
-  tls_key: "/etc/certs/server-key.pem"
-auth:
-  api_key: "test-api-key-secure-key-longer!!"
-wireguard:
-  interface: "wg0"
-  subnet: "10.0.0.0/24"
-  server_ip: "10.0.0.1"
-  listen_port: 51820
-  routing:
-    wan_interface: "eth0"
 `)
 	t.Setenv("NODE_CONFIG", path)
 
@@ -337,116 +273,67 @@ wireguard:
 	if err != nil {
 		t.Fatalf(msgExpectedNoError, err)
 	}
-	if !cfg.TLSEnabled() {
-		t.Fatalf("expected TLS enabled")
+	if cfg.Port != DefaultAPIPort || cfg.WGInterface != DefaultInterface || cfg.WGListenPort != DefaultWireGuardPort {
+		t.Fatalf("defaults not applied: port=%d iface=%q listen=%d", cfg.Port, cfg.WGInterface, cfg.WGListenPort)
 	}
-	if cfg.TLSCertFile != "/etc/certs/server.pem" || cfg.TLSKeyFile != "/etc/certs/server-key.pem" {
-		t.Fatalf("unexpected TLS paths: cert=%q key=%q", cfg.TLSCertFile, cfg.TLSKeyFile)
+	if cfg.PeerStoreFile != DefaultPeerStoreFile {
+		t.Fatalf("expected default peer store, got %q", cfg.PeerStoreFile)
 	}
 }
 
-func TestLoadConfigTLSOnlyCert(t *testing.T) {
-	path := writeConfigFile(t, `
-server:
-  port: "51821"
-  tls_cert: "/etc/certs/server.pem"
+func TestLoadConfigInvalidInterfaceName(t *testing.T) {
+	for _, name := range []string{"../../etc/x", "wg0;reboot", "a-very-long-interface-name"} {
+		t.Run(name, func(t *testing.T) {
+			path := writeConfigFile(t, `
 auth:
   api_key: "test-api-key-secure-key-longer!!"
 wireguard:
-  interface: "wg0"
+  interface: "`+name+`"
   subnet: "10.0.0.0/24"
-  listen_port: 51820
-  routing:
-    wan_interface: "eth0"
 `)
-	t.Setenv("NODE_CONFIG", path)
-
-	if _, err := LoadConfig(); err == nil {
-		t.Fatalf("expected error when only tls_cert is set")
+			t.Setenv("NODE_CONFIG", path)
+			if _, err := LoadConfig(); err == nil {
+				t.Fatalf("expected error for interface %q", name)
+			}
+		})
 	}
 }
 
-func TestLoadConfigTLSOnlyKey(t *testing.T) {
+// TestLoadConfigUnknownKeyRejected guards against typos silently dropping a
+// setting, e.g. a misspelled allow_private_networks.
+func TestLoadConfigUnknownKeyRejected(t *testing.T) {
 	path := writeConfigFile(t, `
-server:
-  port: "51821"
-  tls_key: "/etc/certs/server-key.pem"
 auth:
   api_key: "test-api-key-secure-key-longer!!"
 wireguard:
-  interface: "wg0"
   subnet: "10.0.0.0/24"
-  listen_port: 51820
   routing:
-    wan_interface: "eth0"
+    alow_private_networks: true
 `)
 	t.Setenv("NODE_CONFIG", path)
-
-	if _, err := LoadConfig(); err == nil {
-		t.Fatalf("expected error when only tls_key is set")
+	_, err := LoadConfig()
+	if err == nil || !strings.Contains(err.Error(), "alow_private_networks") {
+		t.Fatalf("expected an unknown-field error naming the key, got %v", err)
 	}
 }
 
-func TestLoadConfigAllowedIPs(t *testing.T) {
+// TestLoadConfigParseErrorHidesSecrets checks that a YAML error doesn't echo
+// the surrounding source lines, which would print the API key into the log.
+func TestLoadConfigParseErrorHidesSecrets(t *testing.T) {
 	path := writeConfigFile(t, `
-server:
-  port: "`+testPort+`"
-  allowed_ips:
-    - "`+testWGSubnet4+`"
-    - "192.168.1.1"
 auth:
-  api_key: "`+testAPIKey+`"
+  api_key: "super-secret-api-key-value-0123456789"
 wireguard:
-  interface: "wg0"
-  subnet: "`+testWGSubnet4+`"
-  server_ip: "`+testWGServerIP4+`"
-  listen_port: 51820
-  routing:
-    wan_interface: "`+testWANInterface+`"
-`)
-	t.Setenv("NODE_CONFIG", path)
-
-	cfg, err := LoadConfig()
-	if err != nil {
-		t.Fatalf(msgExpectedNoError, err)
-	}
-	if cfg.AllowedNets == nil || len(cfg.AllowedNets) != 2 {
-		t.Fatalf("expected 2 allowed nets, got %v", cfg.AllowedNets)
-	}
-	// testWGSubnet4
-	if !cfg.AllowedNets[0].Contains(net.ParseIP(testWGServerIP4)) {
-		t.Fatalf("expected first net to contain %s", testWGServerIP4)
-	}
-	// 192.168.1.1/32
-	if !cfg.AllowedNets[1].Contains(net.ParseIP("192.168.1.1")) {
-		t.Fatal("expected second net to contain 192.168.1.1")
-	}
-	if cfg.AllowedNets[1].Contains(net.ParseIP("192.168.1.2")) {
-		t.Fatal("expected /32 to not contain 192.168.1.2")
-	}
-}
-
-func TestLoadConfigAllowedIPsInvalid(t *testing.T) {
-	path := writeConfigFile(t, `
-server:
-  port: "51821"
-  allowed_ips:
-    - "10.0.0.0/24"
-    - "not-an-ip"
-auth:
-  api_key: "test-api-key-secure-key-longer!!"
-wireguard:
-  interface: "wg0"
   subnet: "10.0.0.0/24"
-  server_ip: "10.0.0.1"
-  listen_port: 51820
-  routing:
-    wan_interface: "eth0"
+  listen_port: not-a-number
 `)
 	t.Setenv("NODE_CONFIG", path)
-
-	if _, err := LoadConfig(); err == nil {
-		t.Fatalf("expected error for invalid allowed_ips entry")
+	_, err := LoadConfig()
+	if err == nil {
+		t.Fatal("expected a parse error")
+	}
+	if strings.Contains(err.Error(), "super-secret") {
+		t.Fatalf("parse error leaks the config source: %v", err)
 	}
 }
 
@@ -473,6 +360,65 @@ wireguard:
 	}
 	if cfg.PeerStoreFile != "peers.db" {
 		t.Fatalf("expected peer_store_file peers.db, got %q", cfg.PeerStoreFile)
+	}
+}
+
+func TestLoadConfigWANInterfaceOptional(t *testing.T) {
+	path := writeConfigFile(t, `
+server:
+  port: "51821"
+auth:
+  api_key: "test-api-key-secure-key-longer!!"
+wireguard:
+  interface: "wg0"
+  subnet: "10.0.0.0/24"
+  listen_port: 51820
+`)
+	t.Setenv("NODE_CONFIG", path)
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf(msgExpectedNoError, err)
+	}
+	if cfg.WANInterface != "" {
+		t.Fatalf("expected empty WAN interface (detected at startup), got %q", cfg.WANInterface)
+	}
+}
+
+func TestLoadConfigAllowPrivateNetworks(t *testing.T) {
+	path := writeConfigFile(t, `
+server:
+  port: "51821"
+auth:
+  api_key: "test-api-key-secure-key-longer!!"
+wireguard:
+  interface: "wg0"
+  subnet: "10.0.0.0/24"
+  listen_port: 51820
+  routing:
+    allow_private_networks: true
+`)
+	t.Setenv("NODE_CONFIG", path)
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf(msgExpectedNoError, err)
+	}
+	if !cfg.AllowPrivateNetworks {
+		t.Fatal("expected AllowPrivateNetworks=true")
+	}
+}
+
+func TestLoadConfigPeerStoreFileDefault(t *testing.T) {
+	path := writeSubnetConfig(t, testWGSubnet4, "")
+	t.Setenv("NODE_CONFIG", path)
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf(msgExpectedNoError, err)
+	}
+	if cfg.PeerStoreFile != DefaultPeerStoreFile {
+		t.Fatalf("expected default peer store %q, got %q", DefaultPeerStoreFile, cfg.PeerStoreFile)
 	}
 }
 
@@ -585,29 +531,6 @@ func TestLoadConfigInvalidYAML(t *testing.T) {
 	}
 }
 
-// ---------- parseOneAllowedIP ----------
-
-func TestParseOneAllowedIPIPv6Address(t *testing.T) {
-	ipNet, err := parseOneAllowedIP("field", 0, "::1")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if ipNet == nil {
-		t.Fatal("expected non-nil IPNet")
-	}
-	ones, bits := ipNet.Mask.Size()
-	if ones != 128 || bits != 128 {
-		t.Fatalf("expected /128 mask, got /%d", ones)
-	}
-}
-
-func TestParseOneAllowedIPInvalidCIDR(t *testing.T) {
-	_, err := parseOneAllowedIP("field", 0, "10.0.0.0/33")
-	if err == nil {
-		t.Fatal("expected error for invalid CIDR")
-	}
-}
-
 // ---------- validateWireGuardSubnet helpers ----------
 
 func TestValidateWireGuardSubnet4RejectsIPv6(t *testing.T) {
@@ -639,26 +562,6 @@ func TestLoadConfigNodeConfigWhitespace(t *testing.T) {
 	}
 }
 
-func TestParseAllowedIPsAllEmptyStrings(t *testing.T) {
-	nets, err := parseAllowedIPs("field", []string{"", " ", ""})
-	if err != nil {
-		t.Fatalf(msgExpectedNoError, err)
-	}
-	if nets != nil {
-		t.Fatalf("expected nil nets for all-empty entries, got %v", nets)
-	}
-}
-
-func TestParseAllowedIPsIPv6CIDR(t *testing.T) {
-	nets, err := parseAllowedIPs("field", []string{"fd00::/64"})
-	if err != nil {
-		t.Fatalf(msgExpectedNoError, err)
-	}
-	if len(nets) != 1 {
-		t.Fatalf("expected 1 net, got %d", len(nets))
-	}
-}
-
 func TestOptionalIPv4WithIPv6Address(t *testing.T) {
 	_, err := optionalIPv4("field", "fd00::1")
 	if err == nil {
@@ -674,20 +577,20 @@ func TestOptionalIPv6WithIPv4Address(t *testing.T) {
 }
 
 func TestParsePortZero(t *testing.T) {
-	if _, err := parsePort("field", "0"); err == nil {
+	if _, err := parseAPIPort("0"); err == nil {
 		t.Fatal("expected error for port 0")
 	}
 }
 
 func TestParsePortMaxValid(t *testing.T) {
-	port, err := parsePort("field", "65535")
+	port, err := parseAPIPort("65535")
 	if err != nil || port != 65535 {
 		t.Fatalf("expected port 65535, got %d, err: %v", port, err)
 	}
 }
 
 func TestParsePortTooHigh(t *testing.T) {
-	if _, err := parsePort("field", "65536"); err == nil {
+	if _, err := parseAPIPort("65536"); err == nil {
 		t.Fatal("expected error for port 65536")
 	}
 }
@@ -701,20 +604,6 @@ func TestRequirePortZero(t *testing.T) {
 func TestRequirePortValid(t *testing.T) {
 	if err := requirePort("field", 51820); err != nil {
 		t.Fatalf(msgExpectedNoError, err)
-	}
-}
-
-func TestTLSEnabledFalse(t *testing.T) {
-	cfg := Config{}
-	if cfg.TLSEnabled() {
-		t.Error("expected TLSEnabled=false when no cert/key configured")
-	}
-}
-
-func TestTLSEnabledTrue(t *testing.T) {
-	cfg := Config{TLSCertFile: "cert.pem", TLSKeyFile: "key.pem"}
-	if !cfg.TLSEnabled() {
-		t.Error("expected TLSEnabled=true when both cert and key are set")
 	}
 }
 
@@ -840,83 +729,23 @@ metrics:
 	}
 }
 
-func TestLoadConfigMetricsPerPeerDefaultsApplied(t *testing.T) {
-	path := writeConfigFile(t, baseConfigForMetrics+`
+func TestLoadConfigRejectsRemovedPerPeerMetrics(t *testing.T) {
+	for name, block := range map[string]string{
+		"per_peer":     "  per_peer: false\n",
+		"per_peer_max": "  per_peer_max: 500\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := writeConfigFile(t, baseConfigForMetrics+`
 metrics:
   port: 9090
   token: "metrics-bearer-token-32chars-min!"
-  per_peer: true
-`)
-	t.Setenv("NODE_CONFIG", path)
-
-	cfg, err := LoadConfig()
-	if err != nil {
-		t.Fatalf(msgExpectedNoError, err)
-	}
-	if !cfg.MetricsPerPeer {
-		t.Error("expected MetricsPerPeer=true")
-	}
-	if cfg.MetricsPerPeerMax != defaultMetricsPerPeerMax {
-		t.Errorf("expected default cap %d, got %d", defaultMetricsPerPeerMax, cfg.MetricsPerPeerMax)
-	}
-}
-
-func TestLoadConfigMetricsPerPeerExplicitMax(t *testing.T) {
-	path := writeConfigFile(t, baseConfigForMetrics+`
-metrics:
-  port: 9090
-  token: "metrics-bearer-token-32chars-min!"
-  per_peer: true
-  per_peer_max: 500
-`)
-	t.Setenv("NODE_CONFIG", path)
-
-	cfg, err := LoadConfig()
-	if err != nil {
-		t.Fatalf(msgExpectedNoError, err)
-	}
-	if cfg.MetricsPerPeerMax != 500 {
-		t.Errorf("expected cap 500, got %d", cfg.MetricsPerPeerMax)
-	}
-}
-
-func TestLoadConfigMetricsPerPeerMaxOutOfRange(t *testing.T) {
-	for _, v := range []int{-1, maxMetricsPerPeerMax + 1} {
-		path := writeConfigFile(t, baseConfigForMetrics+`
-metrics:
-  port: 9090
-  token: "metrics-bearer-token-32chars-min!"
-  per_peer: true
-  per_peer_max: `+itoa(v)+`
-`)
-		t.Setenv("NODE_CONFIG", path)
-		if _, err := LoadConfig(); err == nil {
-			t.Errorf("expected error for per_peer_max=%d", v)
-		}
-	}
-}
-
-func TestLoadConfigMetricsPerPeerOffWhenDisabled(t *testing.T) {
-	// per_peer is ignored when metrics endpoint is off.
-	path := writeConfigFile(t, baseConfigForMetrics+`
-metrics:
-  per_peer: true
-  per_peer_max: 500
-`)
-	t.Setenv("NODE_CONFIG", path)
-
-	cfg, err := LoadConfig()
-	if err != nil {
-		t.Fatalf(msgExpectedNoError, err)
-	}
-	if cfg.MetricsEnabled() {
-		t.Error("metrics should be disabled (port=0)")
-	}
-	if cfg.MetricsPerPeer {
-		t.Error("MetricsPerPeer must be false when metrics endpoint is off")
-	}
-	if cfg.MetricsPerPeerMax != 0 {
-		t.Errorf("MetricsPerPeerMax must be 0 when disabled, got %d", cfg.MetricsPerPeerMax)
+`+block)
+			t.Setenv("NODE_CONFIG", path)
+			_, err := LoadConfig()
+			if err == nil || !strings.Contains(err.Error(), "removed in 2.0.0") {
+				t.Fatalf("expected removal error for metrics.%s, got %v", name, err)
+			}
+		})
 	}
 }
 
@@ -957,4 +786,18 @@ func itoa(n int) string {
 		buf[i] = '-'
 	}
 	return string(buf[i:])
+}
+
+// TestConfigExampleLoads keeps config.example.yaml valid under strict key
+// checking once its placeholder API key is replaced.
+func TestConfigExampleLoads(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "config.example.yaml"))
+	if err != nil {
+		t.Fatalf("read example: %v", err)
+	}
+	content := strings.Replace(string(raw), "REPLACE_WITH_32+_RANDOM_CHARS", testAPIKey, 1)
+	t.Setenv("NODE_CONFIG", writeConfigFile(t, content))
+	if _, err := LoadConfig(); err != nil {
+		t.Fatalf("config.example.yaml does not load: %v", err)
+	}
 }

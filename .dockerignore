@@ -3,19 +3,24 @@
 .github
 .gitignore
 
-# IDE
+# IDE / local tooling
 .idea
+.cache
+
+# Runtime secrets from a local compose run: server private key, peer store
+/wireguard
+/data
 
 # CI / linting
 .golangci.yml
 
-# Docs & license
+# Docs, examples & license
+/examples
 *.md
 LICENSE
 
 # Config files (not needed in build)
 config*.yaml
-Caddyfile
 
 # Secrets
 .env
@@ -30,3 +35,8 @@ pr.txt
 docker-compose*.yml
 lefthook.yml
 **/*_test.go
+codecov.yml
+
+# Install script and end-to-end test
+/scripts
+/test

@@ -1,7 +1,6 @@
 package server
 
 import (
-	"crypto/tls"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -29,26 +28,12 @@ func TestSecurityHeadersMiddleware(t *testing.T) {
 		if rec.Header().Get("X-Frame-Options") != "DENY" {
 			t.Errorf("X-Frame-Options: got %q", rec.Header().Get("X-Frame-Options"))
 		}
-		if rec.Header().Get("X-XSS-Protection") != "1; mode=block" {
-			t.Errorf("X-XSS-Protection: got %q", rec.Header().Get("X-XSS-Protection"))
-		}
 		if rec.Header().Get("Referrer-Policy") != "strict-origin-when-cross-origin" {
 			t.Errorf("Referrer-Policy: got %q", rec.Header().Get("Referrer-Policy"))
 		}
 		if hsts := rec.Header().Get("Strict-Transport-Security"); hsts != "" {
-			t.Errorf("HSTS should be empty when not TLS, got %q", hsts)
+			t.Errorf("HSTS is the reverse proxy's job, got %q", hsts)
 		}
 	})
 
-	t.Run("sets_hsts_when_tls", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/ok", nil)
-		req.TLS = &tls.ConnectionState{}
-		rec := httptest.NewRecorder()
-		r.ServeHTTP(rec, req)
-
-		hsts := rec.Header().Get("Strict-Transport-Security")
-		if hsts != "max-age=31536000; includeSubDomains; preload" {
-			t.Errorf("Strict-Transport-Security: got %q", hsts)
-		}
-	})
 }

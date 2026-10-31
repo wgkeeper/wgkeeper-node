@@ -1,35 +1,30 @@
+# Only auth.api_key and a subnet are required; everything else has a default.
+# Unknown keys are errors.
 server:
+  # Plain HTTP, default 51821. For HTTPS and client IP filtering put a reverse
+  # proxy in front (see docs/deployment.md).
   port: 51821
-  # Optional: enable HTTPS (set both paths)
-  # tls_cert: "/app/certs/fullchain.pem"
-  # tls_key: "/app/certs/privkey.pem"
-  # Optional: allow API access only from these IPv4/IPv6 addresses or CIDRs (omit or leave empty to allow all)
-  # allowed_ips:
-  #   - "10.0.0.0/24"
-  #   - "fd00::1"
-  # Optional: reverse-proxy IPs/CIDRs allowed to set X-Forwarded-For. Empty = trust
-  # only loopback (127.0.0.1, ::1). When the node sits behind a NON-loopback proxy
-  # (e.g. a Caddy container reaching it over the docker bridge), list that proxy's
-  # network here — otherwise allowed_ips and rate limiting see the proxy IP, not the
-  # real client. For docker-compose.prod-secure.yml use the bridge subnet:
-  # trusted_proxies:
-  #   - "172.18.0.0/16"
 auth:
-  api_key: "changeme"
+  # At least 32 characters. Generate with: openssl rand -hex 32
+  api_key: "REPLACE_WITH_32+_RANDOM_CHARS"
 wireguard:
   interface: "wg0"
   # At least one of subnet or subnet6 is required. You can set both for dual-stack.
   subnet: "10.0.0.0/24"
   server_ip: "10.0.0.1"
-  # Optional: IPv6 (any prefix, e.g. /64, /112, /128; for /64 the first 65536 addresses are used)
+  # Optional: IPv6 (prefix up to /126, e.g. /64 or /112; for /64 the first 65536 addresses are used)
   # subnet6: "fd00::/112"
   # server_ip6: "fd00::1"
   listen_port: 51820
-  # Optional: persist peer store to a bbolt DB file (load on startup, save on every change).
-  # For Docker: use "/app/peers/peers.db" and mount ./peers:/app/peers so the app creates the file.
+  # Peers are always persisted to a bbolt file, created on first start.
+  # Default: /var/lib/wgkeeper/peers.db (mounted as ./data in the compose files).
   # peer_store_file: "/var/lib/wgkeeper/peers.db"
-  routing:
-    wan_interface: "eth0"
+  # routing:
+  #   # Optional: outbound interface for NAT. Detected from the default route when unset.
+  #   wan_interface: "eth0"
+  #   # Let peers reach private networks (10/8, 172.16/12, 192.168/16, 100.64/10,
+  #   # fc00::/7) through the node, e.g. an office LAN. Off: internet only.
+  #   allow_private_networks: false
 # Optional: Prometheus /metrics endpoint. Off by default.
 #
 # IMPORTANT: in Docker do NOT publish this port on the host. Keep the
@@ -42,17 +37,3 @@ wireguard:
 # metrics:
 #   port: 9090
 #   token: "REPLACE_WITH_32+_RANDOM_CHARS"
-#
-#   # Optional: per-peer metrics (rx/tx, last handshake age) labelled by
-#   # peer_id and allowed_ip. Off by default — they expand cardinality with
-#   # peer count. Cap is applied as top-N by recent traffic; quieter peers
-#   # fall out of metrics but remain visible via the REST API.
-#   #
-#   # Recommended caps (see README → Metrics → Cardinality):
-#   #   <500 peers   → 500
-#   #   500-2000     → 200
-#   #   2000-10000   → 100  (default)
-#   #   10000+       → 50
-#   #   50000+       → keep per_peer disabled, drill down via REST API
-#   per_peer: false
-#   per_peer_max: 100

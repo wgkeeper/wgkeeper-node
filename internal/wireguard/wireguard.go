@@ -1,20 +1,15 @@
 package wireguard
 
 import (
-	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
-	"log/slog"
-	"math"
 	"net"
-	"os"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wgkeeper/wgkeeper-node/internal/config"
-	"github.com/wgkeeper/wgkeeper-node/internal/version"
 
 	"golang.zx2c4.com/wireguard/wgctrl"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
@@ -24,13 +19,32 @@ const (
 	FamilyIPv4 = "IPv4"
 	FamilyIPv6 = "IPv6"
 
-	errSavePeerStoreFmt = "save peer store: %w"
+	errSavePeerStoreFmt = "%w: %w" // ErrPeerStore, cause
 )
 
 var (
 	ErrPeerNotFound             = errors.New("peer not found")
 	ErrNoAvailableIP            = errors.New("no available ip addresses")
 	ErrUnsupportedAddressFamily = errors.New("requested address family is not supported by this node")
+	// ErrInvalidAddressFamily marks a malformed addressFamilies list: an
+	// unknown value or a duplicate. It is a client error, unlike
+	// ErrUnsupportedAddressFamily's valid-but-unavailable family.
+	ErrInvalidAddressFamily = errors.New("invalid address family")
+	// ErrPeerStore wraps failures to write the bbolt peer store.
+	ErrPeerStore = errors.New("save peer store")
+	// ErrDevice wraps failures to change the WireGuard device.
+	ErrDevice = errors.New("configure wireguard device")
+	// ErrDeviceTimeout means a device call did not return in time. The kernel
+	// may still apply it, so the change is kept in the peer store and the
+	// device is reconciled to the store in the background.
+	ErrDeviceTimeout = errors.New("wireguard device did not respond in time")
+	// ErrDeviceBusy means an earlier device call is still stuck in the kernel;
+	// no new call was made, so nothing changed.
+	ErrDeviceBusy = errors.New("an earlier wireguard device call has not returned yet")
+	// ErrPeerExpired is returned when rotating a peer whose expiry has passed
+	// without giving it a new one: the rotation would succeed and the cleanup
+	// loop would delete the peer moments later.
+	ErrPeerExpired = errors.New("peer has expired; pass a future expiresAt to renew it")
 )
 
 const (
@@ -45,8 +59,6 @@ const (
 	// active is a tighter "currently passing traffic" definition for /stats.
 	HandshakeStaleThreshold = 5 * time.Minute
 )
-
-var serverStart = time.Now()
 
 type PeerInfo struct {
 	PeerID          string
@@ -68,17 +80,21 @@ type PeerInfo struct {
 // no calls.
 type RollbackObserver interface {
 	// OnPersistRollback fires when configureDevice failed and the bbolt write
-	// was rolled back successfully. op is "create" or "rotate".
+	// was rolled back successfully. op is "create", "rotate", "delete" or "expire".
 	OnPersistRollback(op string)
 	// OnPersistRollbackFailed fires when the rollback itself errored — bbolt
 	// holds a record that startup reconcile will install on the device next
 	// run. This is the alert-the-on-call path.
 	OnPersistRollbackFailed()
+	// OnPeersExpired fires after the cleanup loop removed n expired peers.
+	OnPeersExpired(n int)
 }
 
 const (
 	rollbackOpCreate = "create"
 	rollbackOpRotate = "rotate"
+	rollbackOpDelete = "delete"
+	rollbackOpExpire = "expire"
 )
 
 type WireGuardService struct {
@@ -89,172 +105,41 @@ type WireGuardService struct {
 	subnet6     *net.IPNet
 	serverIP6   net.IP
 	store       *PeerStore
-	persistPath string // if set, peer store is persisted to this file
+	persistPath string // bbolt file the store is persisted to; empty only in tests
 	// rollbackObs receives persist-rollback notifications when set. May be nil
 	// (metrics disabled). All call sites must nil-check before invoking.
 	rollbackObs RollbackObserver
 	// mu serializes operations that modify WireGuard device and peer store together
 	mu sync.Mutex
-	// lastAllocated4/6 are ring-buffer hints for IP allocation: the next search
-	// starts after the last successfully allocated address instead of rescanning
-	// from the subnet start on every call. Accessed only under mu.
-	lastAllocated4 uint32
-	lastAllocated6 net.IP
-	// usedIPs is an incremental cache of all IP addresses currently assigned to
-	// peers (AllowedIPs) plus server IPs. It mirrors the store exactly and is
-	// updated on every peer add/delete so that allocateIPs runs in O(1) instead
-	// of O(N) on every call. Accessed only under mu.
-	usedIPs map[string]struct{}
+	// pool4/pool6 track which peer addresses are taken and hand out free ones.
+	// They mirror the store plus the server addresses. nil when the family is
+	// not configured. Accessed only under mu.
+	pool4 *ipPool
+	pool6 *ipPool
 	// devCache caches the result of client.Device for a short TTL so that
 	// concurrent read operations (Stats, ListPeers, GetPeer, ServerInfo) share
 	// a single kernel round-trip instead of each issuing their own netlink call.
 	devCache *deviceCache
-	// deviceOpTimeout overrides wgOpTimeout for device read operations.
-	// Zero means use wgOpTimeout. Exposed for tests only.
+	// serverInfo caches the server public key and listen port after the first
+	// successful device read; see ServerInfo.
+	serverInfo atomic.Pointer[serverInfo]
+	// deviceOpTimeout overrides wgOpTimeout for device calls. Zero means use
+	// wgOpTimeout. Exposed for tests only.
 	deviceOpTimeout time.Duration
+	// configuring is set while a ConfigureDevice call runs, including one that
+	// timed out and is still stuck in the kernel; reading counts device reads
+	// the same way. They stop a hung netlink from piling up goroutines.
+	configuring atomic.Bool
+	reading     atomic.Int32
+	// needsReconcile is set when a device change timed out; reconcileSignal
+	// wakes the background loop to bring the device back in line with the store.
+	needsReconcile  atomic.Bool
+	reconcileSignal chan struct{}
 }
 
 type wgClient interface {
 	Device(string) (*wgtypes.Device, error)
 	ConfigureDevice(string, wgtypes.Config) error
-}
-
-type Stats struct {
-	Service   ServiceInfo   `json:"service"`
-	WireGuard WireGuardInfo `json:"wireguard"`
-	Peers     PeerStats     `json:"peers"`
-	StartedAt string        `json:"startedAt"`
-}
-
-type ServiceInfo struct {
-	Name    string `json:"name"`
-	Version string `json:"version"`
-}
-
-type PeerStats struct {
-	Possible int `json:"possible"`
-	Issued   int `json:"issued"`
-	Active   int `json:"active"`
-}
-
-type WireGuardInfo struct {
-	Interface       string   `json:"interface"`
-	ListenPort      int      `json:"listenPort"`
-	Subnets         []string `json:"subnets"`
-	ServerIPs       []string `json:"serverIps"`
-	AddressFamilies []string `json:"addressFamilies"` // what the node supports, e.g. ["IPv4", "IPv6"]
-}
-
-// PeerListItem is a minimal peer entry for list responses.
-type PeerListItem struct {
-	PeerID          string     `json:"peerId"`
-	AllowedIPs      []string   `json:"allowedIPs"`
-	AddressFamilies []string   `json:"addressFamilies"` // e.g. ["IPv4"] or ["IPv4", "IPv6"]
-	PublicKey       string     `json:"publicKey"`
-	Active          bool       `json:"active"`
-	LastHandshakeAt *time.Time `json:"lastHandshakeAt"`
-	CreatedAt       string     `json:"createdAt"`
-	ExpiresAt       *string    `json:"expiresAt,omitempty"` // RFC3339, empty if permanent
-}
-
-// PeerDetail extends PeerListItem with traffic stats for single-peer responses.
-type PeerDetail struct {
-	PeerListItem
-	ReceiveBytes  int64 `json:"receiveBytes"`
-	TransmitBytes int64 `json:"transmitBytes"`
-}
-
-// WireGuardSnapshot is an aggregated view of kernel-level WireGuard state for
-// observability. Per-peer breakdown is intentionally absent — exposing it as
-// labelled metrics would blow up cardinality on any non-trivial deployment.
-type WireGuardSnapshot struct {
-	// ReceiveBytesTotal is the sum of ReceiveBytes across all peers as
-	// reported by the kernel via netlink. Monotonically increasing under
-	// normal operation; resets when the interface is recreated.
-	ReceiveBytesTotal int64
-	// TransmitBytesTotal mirrors ReceiveBytesTotal for transmitted bytes.
-	TransmitBytesTotal int64
-	// StalePeers counts peers whose last handshake is older than
-	// HandshakeStaleThreshold or has never happened. Gauge — useful as a
-	// degradation signal independent of the tighter "active" peer count
-	// surfaced by /stats.
-	StalePeers int
-}
-
-// WireGuardSnapshot returns aggregated kernel-level metrics. Reuses the
-// short-lived device cache so a tight scrape interval does not hammer netlink.
-func (s *WireGuardService) WireGuardSnapshot() (WireGuardSnapshot, error) {
-	dev, err := s.cachedDevice()
-	if err != nil {
-		return WireGuardSnapshot{}, err
-	}
-	now := time.Now()
-	var snap WireGuardSnapshot
-	for _, p := range dev.Peers {
-		snap.ReceiveBytesTotal += p.ReceiveBytes
-		snap.TransmitBytesTotal += p.TransmitBytes
-		if p.LastHandshakeTime.IsZero() || now.Sub(p.LastHandshakeTime) > HandshakeStaleThreshold {
-			snap.StalePeers++
-		}
-	}
-	return snap, nil
-}
-
-// PeerSnapshot is a per-peer view of kernel-level state, joined with the peer
-// store so callers see peer_id and allowed IPs alongside the netlink counters.
-// Cardinality of any metric labelled by these fields scales with peer count —
-// metrics consumers must apply a top-N cap.
-type PeerSnapshot struct {
-	PeerID    string
-	AllowedIP string // primary IP from the store record (first allowed_ips entry); used as a low-cardinality companion label
-	// ReceiveBytes / TransmitBytes mirror kernel counters since interface bring-up.
-	ReceiveBytes  int64
-	TransmitBytes int64
-	// LastHandshakeAgeSeconds is "now - last_handshake_time". math.Inf(+1) when
-	// the peer has never handshaken. Kept as age (not absolute timestamp) so
-	// dashboards do not need to compute deltas in PromQL.
-	LastHandshakeAgeSeconds float64
-}
-
-// PeersSnapshot returns one PeerSnapshot per peer present both on the device
-// and in the store. Peers present on the device but not in the store (orphans)
-// are skipped — they would have no peer_id label. Reuses the device cache,
-// matches device peers to store records by public key in O(N).
-func (s *WireGuardService) PeersSnapshot() ([]PeerSnapshot, error) {
-	dev, err := s.cachedDevice()
-	if err != nil {
-		return nil, err
-	}
-	byKey := make(map[wgtypes.Key]PeerRecord)
-	s.store.ForEach(func(rec PeerRecord) {
-		byKey[rec.PublicKey] = rec
-	})
-	now := time.Now()
-	out := make([]PeerSnapshot, 0, len(dev.Peers))
-	for _, p := range dev.Peers {
-		rec, ok := byKey[p.PublicKey]
-		if !ok {
-			// Orphan on device — startup reconcile will remove. Skip from
-			// metrics so dashboards don't show a peer with no peer_id.
-			continue
-		}
-		var primaryIP string
-		if len(rec.AllowedIPs) > 0 {
-			primaryIP = rec.AllowedIPs[0].String()
-		}
-		age := math.Inf(+1)
-		if !p.LastHandshakeTime.IsZero() {
-			age = now.Sub(p.LastHandshakeTime).Seconds()
-		}
-		out = append(out, PeerSnapshot{
-			PeerID:                  rec.PeerID,
-			AllowedIP:               primaryIP,
-			ReceiveBytes:            p.ReceiveBytes,
-			TransmitBytes:           p.TransmitBytes,
-			LastHandshakeAgeSeconds: age,
-		})
-	}
-	return out, nil
 }
 
 func NewWireGuardService(cfg config.Config) (*WireGuardService, error) {
@@ -271,20 +156,23 @@ func NewWireGuardService(cfg config.Config) (*WireGuardService, error) {
 		return nil, err
 	}
 	svc := &WireGuardService{
-		client:      client,
-		deviceName:  cfg.WGInterface,
-		subnet4:     subnet4,
-		serverIP4:   serverIP4,
-		subnet6:     subnet6,
-		serverIP6:   serverIP6,
-		store:       NewPeerStore(),
-		persistPath: cfg.PeerStoreFile,
-		devCache:    newDeviceCache(deviceCacheTTL),
+		client:          client,
+		deviceName:      cfg.WGInterface,
+		subnet4:         subnet4,
+		serverIP4:       serverIP4,
+		subnet6:         subnet6,
+		serverIP6:       serverIP6,
+		store:           NewPeerStore(),
+		persistPath:     cfg.PeerStoreFile,
+		devCache:        newDeviceCache(deviceCacheTTL),
+		reconcileSignal: make(chan struct{}, 1),
 	}
 	if err := initPersistStore(svc); err != nil {
-		return nil, err
+		return nil, errors.Join(err, svc.store.Close())
 	}
-	svc.initUsedIPs()
+	if err := svc.initPools(); err != nil {
+		return nil, errors.Join(err, svc.store.Close())
+	}
 	return svc, nil
 }
 
@@ -324,118 +212,6 @@ func setupSubnet6(subnet6, serverIP6 string) (*net.IPNet, net.IP, error) {
 	return sub, ip, nil
 }
 
-func initPersistStore(svc *WireGuardService) error {
-	if svc.persistPath == "" {
-		return nil
-	}
-	info, err := os.Stat(svc.persistPath)
-	if err == nil && info.IsDir() {
-		return fmt.Errorf("wireguard.peer_store_file must not be a directory: %s", svc.persistPath)
-	}
-	if err := svc.store.OpenFileIfExists(svc.persistPath); err != nil {
-		return fmt.Errorf("load peer store: %w", err)
-	}
-	if err := svc.reconcileStoreWithDevice(); err != nil {
-		return fmt.Errorf("reconcile peer store with device: %w", err)
-	}
-	// Remove expired peers synchronously so they are not visible on the device
-	// or in the store before the HTTP server starts accepting requests.
-	svc.cleanupExpiredPeers()
-	if deleted := svc.reconcileStoreWithSubnets(); len(deleted) > 0 {
-		if err := svc.store.PersistDeleteBatch(deleted...); err != nil {
-			return fmt.Errorf("save peer store after reconcile: %w", err)
-		}
-	}
-	return nil
-}
-
-// reconcileStoreWithDevice synchronises the device with the store at startup.
-// The store is the source of truth: peers in the store but not on the device
-// are added (e.g. after a reboot), and peers on the device whose public keys
-// are not in the store are removed (orphans from a crash mid-write or manual
-// `wg set` calls). Without the latter direction, a crash window between
-// configureDevice and PersistPut leaves an unmanaged peer on the device that
-// is invisible to the store and can collide with future allocations.
-func (s *WireGuardService) reconcileStoreWithDevice() error {
-	device, err := s.deviceWithTimeout()
-	if err != nil {
-		return err
-	}
-	onDevice := make(map[wgtypes.Key]bool)
-	for i := range device.Peers {
-		onDevice[device.Peers[i].PublicKey] = true
-	}
-	inStore := make(map[wgtypes.Key]bool)
-	var toAdd []wgtypes.PeerConfig
-	s.store.ForEach(func(rec PeerRecord) {
-		inStore[rec.PublicKey] = true
-		if !onDevice[rec.PublicKey] {
-			psk := rec.PresharedKey
-			toAdd = append(toAdd, wgtypes.PeerConfig{
-				PublicKey:                   rec.PublicKey,
-				PresharedKey:                &psk,
-				AllowedIPs:                  rec.AllowedIPs,
-				ReplaceAllowedIPs:           true,
-				PersistentKeepaliveInterval: keepaliveInterval(),
-			})
-		}
-	})
-	var toRemove []wgtypes.PeerConfig
-	for i := range device.Peers {
-		if !inStore[device.Peers[i].PublicKey] {
-			slog.Warn("reconcile: removing orphan peer from device",
-				"publicKey", device.Peers[i].PublicKey.String())
-			toRemove = append(toRemove, wgtypes.PeerConfig{
-				PublicKey: device.Peers[i].PublicKey,
-				Remove:    true,
-			})
-		}
-	}
-	peers := append(toAdd, toRemove...)
-	if len(peers) == 0 {
-		return nil
-	}
-	return s.configureDevice(wgtypes.Config{Peers: peers})
-}
-
-// reconcileStoreWithSubnets removes from store and from the device any record whose allowed_ips
-// are not entirely within the current config subnets (subnet4/subnet6).
-// Returns the peer IDs that were successfully removed.
-func (s *WireGuardService) reconcileStoreWithSubnets() []string {
-	var outOfSubnet []PeerRecord
-	s.store.ForEach(func(rec PeerRecord) {
-		if !s.recordAllowedIPsInSubnets(rec) {
-			outOfSubnet = append(outOfSubnet, rec)
-		}
-	})
-	var deleted []string
-	for _, rec := range outOfSubnet {
-		if err := s.configureDevice(wgtypes.Config{
-			Peers: []wgtypes.PeerConfig{{PublicKey: rec.PublicKey, Remove: true}},
-		}); err != nil {
-			// Do not remove from store when device removal fails: removing the store
-			// record while the peer remains on the device would create an orphan that
-			// is invisible to the store and won't be cleaned up on restart.
-			slog.Error("reconcile: failed to remove peer from device, skipping store removal", "peerId", rec.PeerID, "error", err)
-			continue
-		}
-		s.store.Delete(rec.PeerID)
-		deleted = append(deleted, rec.PeerID)
-	}
-	return deleted
-}
-
-func (s *WireGuardService) recordAllowedIPsInSubnets(rec PeerRecord) bool {
-	for _, aip := range rec.AllowedIPs {
-		in4 := s.subnet4 != nil && s.subnet4.Contains(aip.IP)
-		in6 := s.subnet6 != nil && s.subnet6.Contains(aip.IP)
-		if !in4 && !in6 {
-			return false
-		}
-	}
-	return true
-}
-
 // Close releases resources held by the service, including the peer store DB.
 func (s *WireGuardService) Close() error {
 	return s.store.Close()
@@ -457,99 +233,6 @@ func (s *WireGuardService) notifyRollback(op string, rollbackErr error) {
 		return
 	}
 	s.rollbackObs.OnPersistRollback(op)
-}
-
-// configureDevice wraps client.ConfigureDevice with a hard timeout so that a
-// hung kernel module cannot block HTTP handlers indefinitely. The underlying
-// syscall cannot be cancelled, so when the timeout fires the goroutine running
-// the call continues in the background; the buffered channel ensures it
-// eventually exits without leaking.
-func (s *WireGuardService) configureDevice(cfg wgtypes.Config) error {
-	ctx, cancel := context.WithTimeout(context.Background(), wgOpTimeout)
-	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- s.client.ConfigureDevice(s.deviceName, cfg) }()
-	select {
-	case err := <-done:
-		return err
-	case <-ctx.Done():
-		return fmt.Errorf("configure wireguard device: %w", ctx.Err())
-	}
-}
-
-const deviceCacheTTL = time.Second
-
-// deviceCache holds a short-lived snapshot of the WireGuard device state.
-// Multiple concurrent read operations (Stats, ListPeers, GetPeer, ServerInfo)
-// share one kernel round-trip per TTL window instead of each issuing their own
-// netlink call.
-type deviceCache struct {
-	mu        sync.Mutex
-	dev       *wgtypes.Device
-	fetchedAt time.Time
-	ttl       time.Duration
-}
-
-func newDeviceCache(ttl time.Duration) *deviceCache {
-	return &deviceCache{ttl: ttl}
-}
-
-// get returns a cached device snapshot, or fetches a fresh one via fetch when
-// the cache is empty or stale.
-func (c *deviceCache) get(fetch func() (*wgtypes.Device, error)) (*wgtypes.Device, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.dev != nil && time.Since(c.fetchedAt) < c.ttl {
-		return c.dev, nil
-	}
-	dev, err := fetch()
-	if err != nil {
-		return nil, err
-	}
-	c.dev = dev
-	c.fetchedAt = time.Now()
-	return dev, nil
-}
-
-// deviceWithTimeout wraps client.Device with a hard timeout so that a hung
-// kernel module cannot block read operations (Stats, ListPeers, GetPeer,
-// ServerInfo) indefinitely. The underlying syscall cannot be cancelled, so
-// when the timeout fires the goroutine continues in the background; the
-// buffered channel ensures it eventually exits without leaking.
-func (s *WireGuardService) deviceWithTimeout() (*wgtypes.Device, error) {
-	timeout := s.deviceOpTimeout
-	if timeout <= 0 {
-		timeout = wgOpTimeout
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	type result struct {
-		dev *wgtypes.Device
-		err error
-	}
-	done := make(chan result, 1)
-	go func() {
-		dev, err := s.client.Device(s.deviceName)
-		done <- result{dev, err}
-	}()
-	select {
-	case r := <-done:
-		return r.dev, r.err
-	case <-ctx.Done():
-		return nil, fmt.Errorf("read wireguard device: %w", ctx.Err())
-	}
-}
-
-// cachedDevice returns a recent snapshot of the WireGuard device, fetching a
-// fresh one from the kernel when the cache has expired. Falls back to a direct
-// call when devCache is nil (e.g. in tests that construct the service manually).
-func (s *WireGuardService) cachedDevice() (*wgtypes.Device, error) {
-	if s.devCache == nil {
-		return s.deviceWithTimeout()
-	}
-	return s.devCache.get(func() (*wgtypes.Device, error) {
-		return s.deviceWithTimeout()
-	})
 }
 
 // NodeAddressFamilies returns the address families this node supports (e.g. ["IPv4", "IPv6"]).
@@ -575,10 +258,10 @@ func (s *WireGuardService) ValidateAddressFamilies(requested []string) ([]string
 	var out []string
 	for _, f := range requested {
 		if f != FamilyIPv4 && f != FamilyIPv6 {
-			return nil, fmt.Errorf("addressFamilies may only contain %q and %q", FamilyIPv4, FamilyIPv6)
+			return nil, fmt.Errorf("%w: addressFamilies may only contain %q and %q", ErrInvalidAddressFamily, FamilyIPv4, FamilyIPv6)
 		}
 		if seen[f] {
-			return nil, fmt.Errorf("duplicate address family %q", f)
+			return nil, fmt.Errorf("%w: duplicate %q", ErrInvalidAddressFamily, f)
 		}
 		seen[f] = true
 		if !slices.Contains(nodeFamilies, f) {
@@ -587,864 +270,4 @@ func (s *WireGuardService) ValidateAddressFamilies(requested []string) ([]string
 		out = append(out, f)
 	}
 	return out, nil
-}
-
-// EnsurePeer creates a new peer or rotates keys for an existing one.
-//
-// Persistence is write-ahead: the new record is written to bbolt BEFORE the
-// device is mutated. If the device write fails, the persist is rolled back so
-// device, in-memory store, and bbolt converge to the pre-call state. If the
-// process crashes between persist and configureDevice, startup reconcile
-// restores the device from the store. This eliminates the classic
-// "device-changed but bbolt-not-yet" window where a crash would either lose a
-// peer (new peer case) or strand a client on a now-unrecoverable private key
-// (rotation case).
-//
-// Everything runs under s.mu, including the bbolt I/O. Peer create/rotate is
-// rare (orchestrator-driven, not data-path), so holding the lock through a
-// short fsync is the right trade-off for correctness.
-func (s *WireGuardService) EnsurePeer(peerID string, expiresAt *time.Time, addressFamilies []string) (PeerInfo, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if record, ok := s.store.Get(peerID); ok {
-		return s.rotatePeer(peerID, record, expiresAt)
-	}
-	return s.createPeer(peerID, expiresAt, addressFamilies)
-}
-
-// createPeer adds a brand-new peer. Must be called with s.mu held.
-func (s *WireGuardService) createPeer(peerID string, expiresAt *time.Time, addressFamilies []string) (PeerInfo, error) {
-	families, err := s.ValidateAddressFamilies(addressFamilies)
-	if err != nil {
-		return PeerInfo{}, err
-	}
-
-	allowedIPs, err := s.allocateIPs(families)
-	if err != nil {
-		return PeerInfo{}, err
-	}
-
-	privateKey, err := wgtypes.GeneratePrivateKey()
-	if err != nil {
-		s.releaseAllocatedIPs(allowedIPs)
-		return PeerInfo{}, err
-	}
-	publicKey := privateKey.PublicKey()
-	presharedKey, err := wgtypes.GenerateKey()
-	if err != nil {
-		s.releaseAllocatedIPs(allowedIPs)
-		return PeerInfo{}, err
-	}
-
-	rec := PeerRecord{
-		PeerID:       peerID,
-		PublicKey:    publicKey,
-		PresharedKey: presharedKey,
-		AllowedIPs:   allowedIPs,
-		CreatedAt:    time.Now().UTC(),
-		ExpiresAt:    expiresAt,
-	}
-
-	// Write-ahead persist: bbolt is updated before the device. If this fails,
-	// nothing has changed yet — return the error and free the reserved IP.
-	if err := s.store.PersistPut(rec); err != nil {
-		s.releaseAllocatedIPs(allowedIPs)
-		return PeerInfo{}, fmt.Errorf(errSavePeerStoreFmt, err)
-	}
-
-	peerConfig := wgtypes.PeerConfig{
-		PublicKey:                   publicKey,
-		PresharedKey:                &presharedKey,
-		AllowedIPs:                  allowedIPs,
-		ReplaceAllowedIPs:           true,
-		PersistentKeepaliveInterval: keepaliveInterval(),
-	}
-	if err := s.configureDevice(wgtypes.Config{Peers: []wgtypes.PeerConfig{peerConfig}}); err != nil {
-		// Rollback persist (best-effort). On rollback failure the peer remains
-		// in bbolt as an orphan; startup reconcile will install it on the
-		// device next time and it becomes a normal (unused) peer the operator
-		// can delete via the API.
-		rbErr := s.store.PersistDeleteBatch(peerID)
-		if rbErr != nil {
-			slog.Error("rollback persist after configureDevice failure",
-				"peerId", peerID, "rollback_error", rbErr, "device_error", err)
-		}
-		s.notifyRollback(rollbackOpCreate, rbErr)
-		s.releaseAllocatedIPs(allowedIPs)
-		return PeerInfo{}, err
-	}
-
-	s.store.Set(rec)
-
-	allowedIPsStr := make([]string, len(allowedIPs))
-	for i := range allowedIPs {
-		allowedIPsStr[i] = allowedIPs[i].String()
-	}
-	return PeerInfo{
-		PeerID:          peerID,
-		PublicKey:       publicKey.String(),
-		PrivateKey:      privateKey.String(),
-		PresharedKey:    presharedKey.String(),
-		AllowedIPs:      allowedIPsStr,
-		AddressFamilies: families,
-		Rotated:         false,
-	}, nil
-}
-
-// releaseAllocatedIPs frees IPs from the usedIPs cache after a failed allocation
-// attempt. Must be called with s.mu held.
-func (s *WireGuardService) releaseAllocatedIPs(ips []net.IPNet) {
-	for _, aip := range ips {
-		delete(s.usedIPs, aip.IP.String())
-		s.retractAllocHint(aip.IP)
-	}
-}
-
-func (s *WireGuardService) ServerInfo() (string, int, error) {
-	device, err := s.cachedDevice()
-	if err != nil {
-		return "", 0, err
-	}
-	return device.PublicKey.String(), device.ListenPort, nil
-}
-
-// DeletePeer removes a peer and returns the AllowedIPs that were freed (for
-// audit logging). On persist failure the peer remains absent in memory and on
-// the device but present in bbolt; the next startup reconcile re-installs it.
-// Operators should retry the delete or remove the bbolt record manually.
-func (s *WireGuardService) DeletePeer(peerID string) ([]string, error) {
-	allowedIPs, err := s.doDeletePeer(peerID)
-	if err != nil {
-		return nil, err
-	}
-	if err := s.store.PersistDeleteBatch(peerID); err != nil {
-		return nil, fmt.Errorf(errSavePeerStoreFmt, err)
-	}
-	return allowedIPs, nil
-}
-
-// removePeerUnsafe removes a peer from the WireGuard device, store, and usedIPs cache.
-// Must be called with s.mu held.
-func (s *WireGuardService) removePeerUnsafe(record PeerRecord) error {
-	remove := wgtypes.PeerConfig{PublicKey: record.PublicKey, Remove: true}
-	if err := s.configureDevice(wgtypes.Config{Peers: []wgtypes.PeerConfig{remove}}); err != nil {
-		return err
-	}
-	s.store.Delete(record.PeerID)
-	for _, aip := range record.AllowedIPs {
-		delete(s.usedIPs, aip.IP.String())
-		s.retractAllocHint(aip.IP)
-	}
-	return nil
-}
-
-// retractAllocHint rolls back the ring-buffer allocation hint when an IP is
-// freed. Without this, the allocator always advances forward and skips
-// recently-freed addresses until a full wrap-around of the subnet.
-func (s *WireGuardService) retractAllocHint(ip net.IP) {
-	if ip4 := ip.To4(); ip4 != nil {
-		freed := ipToUint32(ip4)
-		if freed <= s.lastAllocated4 && freed > 0 {
-			s.lastAllocated4 = freed - 1
-		}
-		return
-	}
-	ip16 := ip.To16()
-	if ip16 == nil || s.lastAllocated6 == nil {
-		return
-	}
-	// Retract if freed ≤ lastAllocated6 (i.e. lastAllocated6 is not before freed).
-	if !ipAfterIPv6(ip16, s.lastAllocated6) {
-		s.lastAllocated6 = prevIPv6(ip16)
-	}
-}
-
-// doDeletePeer performs all in-memory and device mutations under s.mu and
-// returns the AllowedIPs that were freed. The caller persists the deletion
-// after releasing the lock.
-func (s *WireGuardService) doDeletePeer(peerID string) ([]string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	record, ok := s.store.Get(peerID)
-	if !ok {
-		return nil, ErrPeerNotFound
-	}
-	if err := s.removePeerUnsafe(record); err != nil {
-		return nil, err
-	}
-	out := make([]string, len(record.AllowedIPs))
-	for i := range record.AllowedIPs {
-		out[i] = record.AllowedIPs[i].String()
-	}
-	return out, nil
-}
-
-func (s *WireGuardService) Stats() (Stats, error) {
-	peersPossible, err := s.possiblePeerCountTotal()
-	if err != nil {
-		return Stats{}, err
-	}
-
-	device, err := s.cachedDevice()
-	if err != nil {
-		return Stats{}, err
-	}
-
-	now := time.Now()
-	active := 0
-	for _, peer := range device.Peers {
-		if peer.LastHandshakeTime.IsZero() {
-			continue
-		}
-		if now.Sub(peer.LastHandshakeTime) <= activePeerWindow {
-			active++
-		}
-	}
-
-	subnets := make([]string, 0, 2)
-	serverIPs := make([]string, 0, 2)
-	if s.subnet4 != nil {
-		subnets = append(subnets, s.subnet4.String())
-		serverIPs = append(serverIPs, s.serverIP4.String())
-	}
-	if s.subnet6 != nil {
-		subnets = append(subnets, s.subnet6.String())
-		serverIPs = append(serverIPs, s.serverIP6.String())
-	}
-	nodeFamilies := s.NodeAddressFamilies()
-
-	return Stats{
-		Service: ServiceInfo{
-			Name:    version.Name,
-			Version: version.Version,
-		},
-		WireGuard: WireGuardInfo{
-			Interface:       s.deviceName,
-			ListenPort:      device.ListenPort,
-			Subnets:         subnets,
-			ServerIPs:       serverIPs,
-			AddressFamilies: nodeFamilies,
-		},
-		Peers: PeerStats{
-			Possible: peersPossible,
-			Issued:   s.store.Len(),
-			Active:   active,
-		},
-		StartedAt: serverStart.UTC().Format(time.RFC3339),
-	}, nil
-}
-
-func (s *WireGuardService) ListPeers(offset, limit int) ([]PeerListItem, int, error) {
-	device, err := s.cachedDevice()
-	if err != nil {
-		return nil, 0, err
-	}
-	devicePeerByKey := make(map[wgtypes.Key]wgtypes.Peer)
-	for _, p := range device.Peers {
-		devicePeerByKey[p.PublicKey] = p
-	}
-
-	records, total := s.store.ListPaginated(offset, limit)
-	now := time.Now()
-	list := make([]PeerListItem, len(records))
-	for i, rec := range records {
-		list[i] = peerRecordToListItem(rec, devicePeerByKey[rec.PublicKey], now)
-	}
-	return list, total, nil
-}
-
-func (s *WireGuardService) GetPeer(peerID string) (*PeerDetail, error) {
-	record, ok := s.store.Get(peerID)
-	if !ok {
-		return nil, ErrPeerNotFound
-	}
-	device, err := s.cachedDevice()
-	if err != nil {
-		return nil, err
-	}
-	var devicePeer wgtypes.Peer
-	for i := range device.Peers {
-		if device.Peers[i].PublicKey == record.PublicKey {
-			devicePeer = device.Peers[i]
-			break
-		}
-	}
-	now := time.Now()
-	item := peerRecordToListItem(record, devicePeer, now)
-	detail := &PeerDetail{
-		PeerListItem:  item,
-		ReceiveBytes:  devicePeer.ReceiveBytes,
-		TransmitBytes: devicePeer.TransmitBytes,
-	}
-	return detail, nil
-}
-
-func peerRecordToListItem(rec PeerRecord, devicePeer wgtypes.Peer, now time.Time) PeerListItem {
-	var lastHandshake *time.Time
-	active := false
-	if !devicePeer.LastHandshakeTime.IsZero() {
-		t := devicePeer.LastHandshakeTime
-		lastHandshake = &t
-		if now.Sub(devicePeer.LastHandshakeTime) <= activePeerWindow {
-			active = true
-		}
-	}
-	createdAt := rec.CreatedAt.UTC().Format(time.RFC3339)
-	if rec.CreatedAt.IsZero() {
-		createdAt = ""
-	}
-	var expiresAt *string
-	if rec.ExpiresAt != nil {
-		s := rec.ExpiresAt.UTC().Format(time.RFC3339)
-		expiresAt = &s
-	}
-	allowedIPs := make([]string, len(rec.AllowedIPs))
-	families := make([]string, 0, 2)
-	for i := range rec.AllowedIPs {
-		allowedIPs[i] = rec.AllowedIPs[i].String()
-		if rec.AllowedIPs[i].IP.To4() != nil {
-			families = appendIfNotPresent(families, FamilyIPv4)
-		} else {
-			families = appendIfNotPresent(families, FamilyIPv6)
-		}
-	}
-	return PeerListItem{
-		PeerID:          rec.PeerID,
-		AllowedIPs:      allowedIPs,
-		AddressFamilies: families,
-		PublicKey:       rec.PublicKey.String(),
-		Active:          active,
-		LastHandshakeAt: lastHandshake,
-		CreatedAt:       createdAt,
-		ExpiresAt:       expiresAt,
-	}
-}
-
-func appendIfNotPresent(slice []string, v string) []string {
-	if slices.Contains(slice, v) {
-		return slice
-	}
-	return append(slice, v)
-}
-
-// rotatePeer rotates keys for an existing peer using write-ahead persist.
-// Must be called with s.mu held.
-//
-// Order: generate new keys → persist new record → configureDevice (atomic
-// remove-old + add-new) → in-memory store.Set. If configureDevice fails the
-// persist is rolled back to the original record. If the process crashes between
-// persist and configureDevice, startup reconcile installs the new key on the
-// device — the client (which already received the new private key) keeps
-// working. This avoids the previous failure mode where a crash after a
-// successful configureDevice but before persist would, on restart, restore the
-// OLD key from bbolt and permanently lock out the client holding the new
-// private key.
-func (s *WireGuardService) rotatePeer(peerID string, record PeerRecord, expiresAt *time.Time) (PeerInfo, error) {
-	privateKey, err := wgtypes.GeneratePrivateKey()
-	if err != nil {
-		return PeerInfo{}, err
-	}
-	publicKey := privateKey.PublicKey()
-	presharedKey, err := wgtypes.GenerateKey()
-	if err != nil {
-		return PeerInfo{}, err
-	}
-
-	effectiveExpiresAt := expiresAt
-	if effectiveExpiresAt == nil {
-		effectiveExpiresAt = record.ExpiresAt
-	}
-	newRec := PeerRecord{
-		PeerID:       peerID,
-		PublicKey:    publicKey,
-		PresharedKey: presharedKey,
-		AllowedIPs:   record.AllowedIPs,
-		CreatedAt:    record.CreatedAt,
-		ExpiresAt:    effectiveExpiresAt,
-	}
-
-	// Write-ahead persist: replace the bbolt record with the new keys before
-	// touching the device. If this fails, nothing has changed.
-	if err := s.store.PersistPut(newRec); err != nil {
-		return PeerInfo{}, fmt.Errorf(errSavePeerStoreFmt, err)
-	}
-
-	config := wgtypes.Config{
-		Peers: []wgtypes.PeerConfig{
-			{PublicKey: record.PublicKey, Remove: true},
-			{
-				PublicKey:                   publicKey,
-				PresharedKey:                &presharedKey,
-				AllowedIPs:                  record.AllowedIPs,
-				ReplaceAllowedIPs:           true,
-				PersistentKeepaliveInterval: keepaliveInterval(),
-			},
-		},
-	}
-	if err := s.configureDevice(config); err != nil {
-		// Rollback persist to the old record. Best-effort: on rollback failure
-		// bbolt holds the new key while the device still has the old one.
-		// Startup reconcile will then install the new key — orphaning the old
-		// peer on the device is impossible because we did not configureDevice.
-		rbErr := s.store.PersistPut(record)
-		if rbErr != nil {
-			slog.Error("rollback persist after rotation failure",
-				"peerId", peerID, "rollback_error", rbErr, "device_error", err)
-		}
-		s.notifyRollback(rollbackOpRotate, rbErr)
-		return PeerInfo{}, err
-	}
-
-	s.store.Set(newRec)
-
-	allowedIPsStr := make([]string, len(record.AllowedIPs))
-	peerFamilies := make([]string, 0, 2)
-	for i := range record.AllowedIPs {
-		allowedIPsStr[i] = record.AllowedIPs[i].String()
-		if record.AllowedIPs[i].IP.To4() != nil {
-			peerFamilies = appendIfNotPresent(peerFamilies, FamilyIPv4)
-		} else {
-			peerFamilies = appendIfNotPresent(peerFamilies, FamilyIPv6)
-		}
-	}
-	return PeerInfo{
-		PeerID:          peerID,
-		PublicKey:       publicKey.String(),
-		PrivateKey:      privateKey.String(),
-		PresharedKey:    presharedKey.String(),
-		AllowedIPs:      allowedIPsStr,
-		AddressFamilies: peerFamilies,
-		Rotated:         true,
-	}, nil
-}
-
-// initUsedIPs builds the usedIPs cache from the current store and server IPs.
-// Must be called after the store is loaded. Not concurrency-safe; call before
-// the service starts handling requests.
-func (s *WireGuardService) initUsedIPs() {
-	s.usedIPs = make(map[string]struct{})
-	if s.serverIP4 != nil {
-		s.usedIPs[s.serverIP4.String()] = struct{}{}
-	}
-	if s.serverIP6 != nil {
-		s.usedIPs[s.serverIP6.String()] = struct{}{}
-	}
-	s.store.ForEach(func(rec PeerRecord) {
-		for _, aip := range rec.AllowedIPs {
-			s.usedIPs[aip.IP.String()] = struct{}{}
-		}
-	})
-}
-
-// allocateIPs allocates one address per requested family. families must be validated (e.g. via ValidateAddressFamilies).
-func (s *WireGuardService) allocateIPs(families []string) ([]net.IPNet, error) {
-	if s.usedIPs == nil {
-		s.initUsedIPs()
-	}
-	wantIPv4, wantIPv6 := familiesRequested(families)
-	var out []net.IPNet
-	if wantIPv4 && s.subnet4 != nil {
-		ipNet, err := allocateOneIPv4(s.subnet4, s.usedIPs, &s.lastAllocated4)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, ipNet)
-	}
-	if wantIPv6 && s.subnet6 != nil {
-		ipNet, err := allocateOneIPv6(s.subnet6, s.usedIPs, &s.lastAllocated6)
-		if err != nil {
-			// Release any address already reserved for an earlier family so a
-			// partially-successful dual-stack allocation does not leak an IPv4
-			// into usedIPs when the IPv6 pool is exhausted.
-			s.releaseAllocatedIPs(out)
-			return nil, err
-		}
-		out = append(out, ipNet)
-	}
-	return out, nil
-}
-
-func familiesRequested(families []string) (wantIPv4, wantIPv6 bool) {
-	for _, f := range families {
-		if f == FamilyIPv4 {
-			wantIPv4 = true
-		}
-		if f == FamilyIPv6 {
-			wantIPv6 = true
-		}
-	}
-	return wantIPv4, wantIPv6
-}
-
-// allocateOneIPv4 finds the next free IPv4 address in subnet.
-// hint, when non-nil, is a ring-buffer cursor: the search starts from *hint+1
-// and wraps around to the subnet start if needed, so sequential allocations are
-// O(1) instead of O(used) when starting from the subnet beginning every time.
-// On success *hint is updated to the allocated address. nil hint disables this.
-func allocateOneIPv4(subnet *net.IPNet, used map[string]struct{}, hint *uint32) (net.IPNet, error) {
-	start, end, err := ipv4Range(subnet)
-	if err != nil {
-		return net.IPNet{}, err
-	}
-	startInt := ipToUint32(start)
-	endInt := ipToUint32(end)
-
-	// For subnets larger than maxIPv4Iter, cap the scan to avoid O(n) worst-case
-	// on a nearly-full subnet (mirrors the maxIter guard in allocateOneIPv6).
-	maxIter := 0
-	if endInt-startInt+1 > maxIPv4Iter {
-		maxIter = maxIPv4Iter
-	}
-
-	searchFrom := startInt
-	if hint != nil && *hint >= startInt && *hint < endInt {
-		searchFrom = *hint + 1
-	}
-
-	n := 0
-	// First pass: searchFrom → end. Wrap-around pass: start → searchFrom−1.
-	if ip, ok := scanIPv4Range(searchFrom, endInt, maxIter, &n, used, hint); ok {
-		return ip, nil
-	}
-	if searchFrom > startInt {
-		if ip, ok := scanIPv4Range(startInt, searchFrom-1, maxIter, &n, used, hint); ok {
-			return ip, nil
-		}
-	}
-	return net.IPNet{}, ErrNoAvailableIP
-}
-
-// scanIPv4Range scans [from, to] for the first free IPv4 address.
-// n is a shared iteration counter; maxIter > 0 caps total iterations across passes.
-func scanIPv4Range(from, to uint32, maxIter int, n *int, used map[string]struct{}, hint *uint32) (net.IPNet, bool) {
-	for candidate := from; candidate <= to; candidate++ {
-		if maxIter > 0 && *n >= maxIter {
-			return net.IPNet{}, false
-		}
-		*n++
-		ip := uint32ToIP(candidate)
-		key := ip.String()
-		if _, exists := used[key]; !exists {
-			used[key] = struct{}{}
-			if hint != nil {
-				*hint = candidate
-			}
-			return net.IPNet{IP: ip, Mask: net.CIDRMask(32, 32)}, true
-		}
-	}
-	return net.IPNet{}, false
-}
-
-// allocateOneIPv6 finds the next free IPv6 address in subnet.
-// hint works the same as in allocateOneIPv4: ring-buffer cursor updated on success.
-func allocateOneIPv6(subnet *net.IPNet, used map[string]struct{}, hint *net.IP) (net.IPNet, error) {
-	start, end, err := ipv6Range(subnet)
-	if err != nil {
-		return net.IPNet{}, err
-	}
-	ones, _ := subnet.Mask.Size()
-	maxIter := 0
-	if ones < 112 {
-		maxIter = maxIPv6PeersReported
-	}
-
-	searchFrom := ipv6SearchFrom(start, end, hint)
-
-	n := 0
-	// First pass: searchFrom → end. Wrap-around pass: start → searchFrom−1.
-	if ip, ok := scanIPv6Range(searchFrom, end, maxIter, &n, used, hint); ok {
-		return ip, nil
-	}
-	if ipAfterIPv6(searchFrom, start) {
-		if ip, ok := scanIPv6Range(start, prevIPv6(searchFrom), maxIter, &n, used, hint); ok {
-			return ip, nil
-		}
-	}
-	return net.IPNet{}, ErrNoAvailableIP
-}
-
-// ipv6SearchFrom resolves the ring-buffer start address for IPv6 allocation.
-func ipv6SearchFrom(start, end net.IP, hint *net.IP) net.IP {
-	searchFrom := make(net.IP, 16)
-	copy(searchFrom, start)
-	if hint == nil || *hint == nil {
-		return searchFrom
-	}
-	last := (*hint).To16()
-	// Use hint only if it's inside the current subnet range.
-	if ipAfterIPv6(start, last) || ipAfterIPv6(last, end) {
-		return searchFrom
-	}
-	next := nextIPv6(last)
-	if !ipAfterIPv6(next, end) {
-		copy(searchFrom, next)
-	}
-	// If next overflows past end, searchFrom stays at start (full wrap).
-	return searchFrom
-}
-
-// scanIPv6Range scans [from, to] for the first free IPv6 address.
-// n is a shared iteration counter; maxIter > 0 caps total iterations across passes.
-func scanIPv6Range(from, to net.IP, maxIter int, n *int, used map[string]struct{}, hint *net.IP) (net.IPNet, bool) {
-	for ip := from; !ipAfterIPv6(ip, to); ip = nextIPv6(ip) {
-		if maxIter > 0 && *n >= maxIter {
-			return net.IPNet{}, false
-		}
-		*n++
-		key := ip.String()
-		if _, exists := used[key]; !exists {
-			used[key] = struct{}{}
-			if hint != nil {
-				allocated := make(net.IP, 16)
-				copy(allocated, ip)
-				*hint = allocated
-			}
-			return net.IPNet{IP: ip, Mask: net.CIDRMask(128, 128)}, true
-		}
-	}
-	return net.IPNet{}, false
-}
-
-// prevIPv6 returns the IPv6 address immediately before ip.
-func prevIPv6(ip net.IP) net.IP {
-	prev := make(net.IP, 16)
-	copy(prev, ip.To16())
-	for i := 15; i >= 0; i-- {
-		if prev[i] > 0 {
-			prev[i]--
-			return prev
-		}
-		prev[i] = 255
-	}
-	return prev
-}
-
-func resolveServerIP4(subnet *net.IPNet, serverIP string) (net.IP, error) {
-	if serverIP != "" {
-		ip := net.ParseIP(serverIP)
-		if ip == nil || ip.To4() == nil {
-			return nil, errors.New("wireguard.server_ip must be a valid IPv4 address")
-		}
-		if !subnet.Contains(ip) {
-			return nil, errors.New("wireguard.server_ip must be inside wireguard.subnet")
-		}
-		return ip.To4(), nil
-	}
-	start, _, err := ipv4Range(subnet)
-	if err != nil {
-		return nil, err
-	}
-	return start, nil
-}
-
-func resolveServerIP6(subnet *net.IPNet, serverIP string) (net.IP, error) {
-	if serverIP != "" {
-		ip := net.ParseIP(serverIP)
-		if ip == nil || ip.To4() != nil {
-			return nil, errors.New("wireguard.server_ip6 must be a valid IPv6 address")
-		}
-		if !subnet.Contains(ip) {
-			return nil, errors.New("wireguard.server_ip6 must be inside wireguard.subnet6")
-		}
-		return ip, nil
-	}
-	start, _, err := ipv6Range(subnet)
-	if err != nil {
-		return nil, err
-	}
-	return start, nil
-}
-
-func ipv4Range(subnet *net.IPNet) (net.IP, net.IP, error) {
-	network := subnet.IP.Mask(subnet.Mask).To4()
-	if network == nil {
-		return nil, nil, errors.New("WG_SUBNET must be IPv4")
-	}
-
-	mask := net.IP(subnet.Mask).To4()
-	if mask == nil {
-		return nil, nil, errors.New("WG_SUBNET mask must be IPv4")
-	}
-
-	networkInt := ipToUint32(network)
-	maskInt := ipToUint32(mask)
-	broadcast := networkInt | ^maskInt
-
-	start := networkInt + 1
-	end := broadcast - 1
-	if end < start {
-		return nil, nil, errors.New("WG_SUBNET is too small")
-	}
-
-	return uint32ToIP(start), uint32ToIP(end), nil
-}
-
-func ipToUint32(ip net.IP) uint32 {
-	ip = ip.To4()
-	return uint32(ip[0])<<24 | uint32(ip[1])<<16 | uint32(ip[2])<<8 | uint32(ip[3])
-}
-
-func uint32ToIP(value uint32) net.IP {
-	ip := make(net.IP, net.IPv4len)
-	binary.BigEndian.PutUint32(ip, value)
-	return ip
-}
-
-func ipv6Range(subnet *net.IPNet) (net.IP, net.IP, error) {
-	if subnet.IP.To4() != nil {
-		return nil, nil, errors.New("expected IPv6 subnet")
-	}
-	ip := subnet.IP.To16()
-	if ip == nil {
-		return nil, nil, errors.New("invalid IPv6 subnet")
-	}
-	_, bits := subnet.Mask.Size()
-	if bits != 128 {
-		return nil, nil, errors.New("invalid IPv6 subnet mask")
-	}
-	network := make(net.IP, 16)
-	copy(network, ip)
-	start := make(net.IP, 16)
-	copy(start, network)
-	for i := 15; i >= 0; i-- {
-		if start[i] < 255 {
-			start[i]++
-			break
-		}
-		start[i] = 0
-	}
-	mask := subnet.Mask
-	broadcast := make(net.IP, 16)
-	for i := range 16 {
-		broadcast[i] = network[i] | ^mask[i]
-	}
-	end := make(net.IP, 16)
-	copy(end, broadcast)
-	for i := 15; i >= 0; i-- {
-		if end[i] > 0 {
-			end[i]--
-			break
-		}
-		end[i] = 255
-	}
-	if ipAfterIPv6(start, end) {
-		return nil, nil, errors.New("IPv6 subnet is too small")
-	}
-	return start, end, nil
-}
-
-func nextIPv6(ip net.IP) net.IP {
-	next := make(net.IP, 16)
-	copy(next, ip.To16())
-	for i := 15; i >= 0; i-- {
-		if next[i] < 255 {
-			next[i]++
-			return next
-		}
-		next[i] = 0
-	}
-	return next
-}
-
-func ipAfterIPv6(a, b net.IP) bool {
-	a = a.To16()
-	b = b.To16()
-	for i := range 16 {
-		if a[i] != b[i] {
-			return a[i] > b[i]
-		}
-	}
-	return false
-}
-
-func keepaliveInterval() *time.Duration {
-	interval := 25 * time.Second
-	return &interval
-}
-
-func possiblePeerCount(subnet *net.IPNet, serverIP net.IP) (int, error) {
-	start, end, err := ipv4Range(subnet)
-	if err != nil {
-		return 0, err
-	}
-
-	startInt := ipToUint32(start)
-	endInt := ipToUint32(end)
-	if endInt < startInt {
-		return 0, nil
-	}
-	total := int(endInt-startInt) + 1
-
-	if serverIP != nil {
-		serverIPv4 := serverIP.To4()
-		if serverIPv4 != nil {
-			serverInt := ipToUint32(serverIPv4)
-			if serverInt >= startInt && serverInt <= endInt {
-				total--
-			}
-		}
-	}
-
-	if total < 0 {
-		return 0, nil
-	}
-	return total, nil
-}
-
-const (
-	maxIPv6PeersReported = 65536
-	// maxIPv4Iter caps the allocation scan for large IPv4 subnets (e.g. /8).
-	// Matches the IPv6 cap so both families have consistent worst-case behaviour.
-	maxIPv4Iter = 65536
-)
-
-func possiblePeerCountIPv6(subnet *net.IPNet, serverIP net.IP) (int, error) {
-	start, end, err := ipv6Range(subnet)
-	if err != nil {
-		return 0, err
-	}
-	ones, _ := subnet.Mask.Size()
-	if ones < 112 {
-		// Subnet too large to iterate; report capped count
-		count := maxIPv6PeersReported
-		if serverIP != nil {
-			ip := serverIP.To16()
-			if ip != nil && !ipAfterIPv6(start, ip) && !ipAfterIPv6(ip, end) {
-				count--
-			}
-		}
-		return count, nil
-	}
-	n := 0
-	for ip := start; !ipAfterIPv6(ip, end); ip = nextIPv6(ip) {
-		if serverIP != nil && ip.Equal(serverIP) {
-			continue
-		}
-		n++
-		if n > maxIPv6PeersReported {
-			return maxIPv6PeersReported, nil
-		}
-	}
-	return n, nil
-}
-
-func (s *WireGuardService) possiblePeerCountTotal() (int, error) {
-	var total int
-	if s.subnet4 != nil {
-		n, err := possiblePeerCount(s.subnet4, s.serverIP4)
-		if err != nil {
-			return 0, err
-		}
-		total += n
-	}
-	if s.subnet6 != nil {
-		n, err := possiblePeerCountIPv6(s.subnet6, s.serverIP6)
-		if err != nil {
-			return 0, err
-		}
-		total += n
-	}
-	return total, nil
 }

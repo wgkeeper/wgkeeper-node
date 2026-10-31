@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/wgkeeper/wgkeeper-node/internal/config"
+
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
 const (
@@ -78,7 +80,8 @@ func TestBuildRoutingRules(t *testing.T) {
 		if len(up) == 0 || len(down) == 0 {
 			t.Errorf("expected rules, got up=%v down=%v", up, down)
 		}
-		assertRoutingRulesCount(t, up, down, 3)
+		// 3 FORWARD + 6 blocked destinations + MASQUERADE + 2 INPUT.
+		assertRoutingRulesCount(t, up, down, 12)
 	})
 
 	t.Run("wan_and_subnet6_returns_ip6tables_rules", func(t *testing.T) {
@@ -238,14 +241,7 @@ func TestBuildAddressLinesSubnet6Error(t *testing.T) {
 
 func TestEnsureWireGuardConfigNew(t *testing.T) {
 	dir := t.TempDir()
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-	defer func() { _ = os.Chdir(cwd) }()
+	t.Chdir(dir)
 
 	cfg := config.Config{
 		WGInterface:  "wgtest",
@@ -263,39 +259,96 @@ func TestEnsureWireGuardConfigNew(t *testing.T) {
 	}
 }
 
-func TestEnsureWireGuardConfigExisting(t *testing.T) {
+// chdirTemp runs the test in a temp dir so non-root defaultConfigPath
+// resolves to ./wireguard/<iface>.conf inside it.
+func chdirTemp(t *testing.T) string {
+	t.Helper()
 	dir := t.TempDir()
-	cwd, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	if err := os.Chdir(dir); err != nil {
-		t.Fatalf("chdir: %v", err)
-	}
-	defer func() { _ = os.Chdir(cwd) }()
+	t.Chdir(dir)
+	return dir
+}
 
-	// Pre-create the config so EnsureWireGuardConfig returns the existing path
+func writeExistingConf(t *testing.T, dir, content string) string {
+	t.Helper()
 	wgDir := filepath.Join(dir, "wireguard")
 	if err := os.MkdirAll(wgDir, 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	existingPath := filepath.Join(wgDir, "wgtest.conf")
-	if err := os.WriteFile(existingPath, []byte("[Interface]\n"), 0o600); err != nil {
+	path := filepath.Join(wgDir, "wgtest.conf")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
+	return path
+}
 
-	cfg := config.Config{WGInterface: "wgtest", WGSubnet: subnetTestCIDR, WGListenPort: 51820}
+func TestEnsureWireGuardConfigRegeneratesKeepingKey(t *testing.T) {
+	dir := chdirTemp(t)
+	key, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	// Written on an earlier start with another port and subnet.
+	writeExistingConf(t, dir, "[Interface]\nPrivateKey = "+key.String()+"\nAddress = 10.9.0.1/24\nListenPort = 40000\n")
+
+	cfg := config.Config{WGInterface: "wgtest", WGSubnet: subnetTestCIDR, WGServerIP: ipServerTest, WGListenPort: 51820, WANInterface: "eth0"}
 	path, err := EnsureWireGuardConfig(cfg)
 	if err != nil {
 		t.Fatalf("EnsureWireGuardConfig(existing): %v", err)
 	}
-	// Verify the returned path still points to the original file
 	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read returned path: %v", err)
+		t.Fatalf("read: %v", err)
+	}
+	got := string(data)
+	if !strings.Contains(got, "PrivateKey = "+key.String()) {
+		t.Errorf("server private key must be preserved, got:\n%s", got)
+	}
+	if !strings.Contains(got, "ListenPort = 51820") || !strings.Contains(got, "Address = 10.0.0.1/24") {
+		t.Errorf("config must reflect config.yaml, got:\n%s", got)
+	}
+	if strings.Contains(got, "40000") || strings.Contains(got, "10.9.0.1") {
+		t.Errorf("stale values must be gone, got:\n%s", got)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("config mode: got %v, want 0600", info.Mode().Perm())
+	}
+}
+
+func TestEnsureWireGuardConfigExistingWithoutKey(t *testing.T) {
+	dir := chdirTemp(t)
+	path := writeExistingConf(t, dir, "[Interface]\n")
+
+	cfg := config.Config{WGInterface: "wgtest", WGSubnet: subnetTestCIDR, WGListenPort: 51820, WANInterface: "eth0"}
+	if _, err := EnsureWireGuardConfig(cfg); err == nil {
+		t.Fatal("expected an error instead of silently replacing the server key")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
 	}
 	if string(data) != "[Interface]\n" {
-		t.Errorf("expected original file content, got %q", data)
+		t.Errorf("file must be left untouched on error, got %q", data)
+	}
+}
+
+func TestPrivateKeyFromConfig(t *testing.T) {
+	key, err := wgtypes.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	got, err := privateKeyFromConfig([]byte("[Interface]\nAddress = 10.0.0.1/24\n  privatekey=" + key.String() + "  \n"))
+	if err != nil || got != key {
+		t.Fatalf("got %v, %v; want the key", got, err)
+	}
+	if _, err := privateKeyFromConfig([]byte("PrivateKey = not-a-key\n")); err == nil {
+		t.Error("expected an error for an invalid key")
+	}
+	if _, err := privateKeyFromConfig([]byte("[Interface]\n")); err == nil {
+		t.Error("expected an error when PrivateKey is missing")
 	}
 }
 
@@ -330,14 +383,15 @@ func TestBuildRoutingRulesWhitespaceOnlyWAN(t *testing.T) {
 }
 
 func TestBuildRoutingRulesBothSubnets(t *testing.T) {
-	// Both IPv4 and IPv6 subnets → 3+3=6 PostUp and 6 PostDown rules.
+	// IPv4: 12 rules (see TestBuildRoutingRules); IPv6: 3 FORWARD + 3 blocked
+	// destinations + MASQUERADE + 2 INPUT = 9.
 	cfg := config.Config{
 		WANInterface: "eth0",
 		WGSubnet:     subnetTestCIDR,
 		WGSubnet6:    subnet6TestCIDR64,
 	}
 	up, down := buildRoutingRules(cfg)
-	assertRoutingRulesCount(t, up, down, 6)
+	assertRoutingRulesCount(t, up, down, 21)
 	joined := strings.Join(up, " ")
 	if !strings.Contains(joined, "iptables") {
 		t.Error("expected iptables rules in PostUp")
@@ -366,5 +420,55 @@ func TestDefaultConfigPath(t *testing.T) {
 	path = defaultConfigPath("wg1")
 	if !strings.Contains(path, "wg1") {
 		t.Errorf("expected wg1 in path, got %q", path)
+	}
+}
+
+// TestBuildRoutingRulesIPv4Exact pins the full IPv4 rule set, so a change to
+// what peers can reach shows up as a reviewable diff.
+func TestBuildRoutingRulesIPv4Exact(t *testing.T) {
+	up, down := buildRoutingRules(config.Config{WANInterface: "eth0", WGSubnet: subnetTestCIDR})
+	wantUp := []string{
+		"iptables -A FORWARD -i %i -o eth0 -s 10.0.0.0/24 -m conntrack --ctstate NEW,ESTABLISHED,RELATED -j ACCEPT",
+		"iptables -A FORWARD -i eth0 -o %i -d 10.0.0.0/24 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
+		"iptables -A FORWARD -i %i -j DROP",
+		"iptables -I FORWARD -i %i -d 169.254.0.0/16 -j DROP",
+		"iptables -I FORWARD -i %i -d 100.100.100.200/32 -j DROP",
+		"iptables -I FORWARD -i %i -d 10.0.0.0/8 -j DROP",
+		"iptables -I FORWARD -i %i -d 172.16.0.0/12 -j DROP",
+		"iptables -I FORWARD -i %i -d 192.168.0.0/16 -j DROP",
+		"iptables -I FORWARD -i %i -d 100.64.0.0/10 -j DROP",
+		"iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o eth0 -j MASQUERADE",
+		"iptables -I INPUT -i %i -j DROP",
+		"iptables -I INPUT -i %i -p icmp -j ACCEPT",
+	}
+	if strings.Join(up, "\n") != strings.Join(wantUp, "\n") {
+		t.Errorf("PostUp mismatch:\ngot:\n%s\nwant:\n%s", strings.Join(up, "\n"), strings.Join(wantUp, "\n"))
+	}
+	// PostDown deletes the same rules in reverse order.
+	for i, rule := range down {
+		want := wantUp[len(wantUp)-1-i]
+		want = strings.Replace(strings.Replace(want, " -A ", " -D ", 1), " -I ", " -D ", 1)
+		if rule != want {
+			t.Errorf("PostDown[%d] = %q, want %q", i, rule, want)
+		}
+	}
+}
+
+func TestBuildRoutingRulesAllowPrivateNetworks(t *testing.T) {
+	cfg := config.Config{WANInterface: "eth0", WGSubnet: subnetTestCIDR, WGSubnet6: subnet6TestCIDR64, AllowPrivateNetworks: true}
+	up, _ := buildRoutingRules(cfg)
+	joined := strings.Join(up, "\n")
+	for _, private := range []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "fc00::/7"} {
+		if strings.Contains(joined, "-d "+private+" -j DROP") {
+			t.Errorf("%s must not be blocked when private networks are allowed", private)
+		}
+	}
+	for _, metadata := range []string{"169.254.0.0/16", "100.100.100.200/32", "fe80::/10", "fd00:ec2::254/128"} {
+		if !strings.Contains(joined, "-d "+metadata+" -j DROP") {
+			t.Errorf("%s must stay blocked even when private networks are allowed", metadata)
+		}
+	}
+	if !strings.Contains(joined, "-i %i -j DROP") {
+		t.Error("peer-to-peer and other-interface traffic must stay blocked")
 	}
 }
