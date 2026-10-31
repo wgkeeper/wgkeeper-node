@@ -23,10 +23,10 @@ jobs:
       pull-requests: read
       checks: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
@@ -35,10 +35,10 @@ jobs:
         run: go vet ./...
 
       - name: Run Go tests
-        run: go test -coverprofile=coverage.txt ./...
+        run: go test -race -coverprofile=coverage.txt ./...
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.txt
@@ -48,10 +48,16 @@ jobs:
         uses: golang/govulncheck-action@v1
         with:
           repo-checkout: false
+          # Scan against the Go version we ship (go.mod), not latest stable.
+          go-version-input: ""
+          go-version-file: go.mod
           go-package: ./...
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v9
+        with:
+          # Pinned so new linter releases don't break CI unexpectedly; bump manually.
+          version: v2.15.0
 
   build_push:
     name: Build & Push Image
@@ -65,7 +71,7 @@ jobs:
       packages: write
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Prepare image name (lowercase)
         run: |

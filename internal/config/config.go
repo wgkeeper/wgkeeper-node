@@ -132,7 +132,7 @@ func LoadConfig() (Config, error) {
 }
 
 func loadConfigFile(path string) (Config, error) {
-	// #nosec G304 -- Reading the operator-selected config path is intended behavior.
+	// #nosec G304 G703 -- Reading the operator-selected config path is intended behavior.
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("read config: %w", err)
