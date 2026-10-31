@@ -3,6 +3,7 @@ package wireguard
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -26,6 +27,14 @@ func EnsureWireGuardConfig(cfg config.Config) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	wan, err := resolveWANInterface(cfg.WANInterface)
+	if err != nil {
+		return "", err
+	}
+	if cfg.WANInterface == "" {
+		slog.Info("detected WAN interface from the default route", "iface", wan)
+	}
+	cfg.WANInterface = wan
 	privateKey, err := wgtypes.GeneratePrivateKey()
 	if err != nil {
 		return "", fmt.Errorf("generate private key: %w", err)

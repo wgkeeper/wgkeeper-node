@@ -22,8 +22,8 @@ WGKeeper Node runs one WireGuard interface on a Linux host and exposes an HTTP A
 - Peers are created with an expiry or as permanent; expired peers are removed by the node itself.
 - Keys can be rotated without changing the peer's IP address.
 - IPv4, IPv6 or dual-stack, with NAT rules set up for you.
-- Peer state can be persisted to a local bbolt file and is reconciled with the device on startup.
-- API key auth, optional IP allowlist, rate and body limits, optional TLS.
+- Peers are stored in a local bbolt file and restored on the interface after every restart.
+- A small HTTP API with API key auth. HTTPS, IP filtering and rate limits are left to the reverse proxy you already use (Caddy, nginx); a ready Caddy setup is included.
 - Optional Prometheus metrics on a separate port with its own token.
 
 Full documentation: [wgkeeper.github.io/docs/node](https://wgkeeper.github.io/docs/node/installation).
@@ -71,7 +71,7 @@ The fastest way to try the node is the image from GHCR with the local Compose fi
    cp config.example.yaml config.yaml
    ```
 
-2. Edit `config.yaml`: set `auth.api_key` to a random value (`openssl rand -hex 32`) and `wireguard.routing.wan_interface` to the host's outbound interface (`ip route show default`).
+2. Edit `config.yaml`: set `auth.api_key` to a random value (`openssl rand -hex 32`). The outbound interface for NAT is detected from the default route.
 
 3. Start the node:
 
@@ -91,7 +91,7 @@ The fastest way to try the node is the image from GHCR with the local Compose fi
 
    The response has the server's public key and port, and the peer's keys and IP addresses: everything a client config needs. The peer's private key is returned only here and is not stored.
 
-WireGuard listens on `51820/udp`. The API listens on `51821` over plain HTTP until you configure TLS; for anything beyond a test, use the [production setup with Caddy](#docker-compose-with-caddy-production).
+WireGuard listens on `51820/udp`. The API is plain HTTP on `51821`, published on `127.0.0.1` only. To reach it from other machines, use the [production setup with Caddy](#docker-compose-with-caddy-production).
 
 ## Requirements
 
@@ -109,7 +109,7 @@ The node reads `./config.yaml`. Set `NODE_CONFIG` to use another path:
 NODE_CONFIG=/etc/wgkeeper/config.yaml
 ```
 
-`DEBUG=true` (or `1`) turns on verbose logs and puts internal error details into API responses. Do not use it in production.
+`DEBUG=true` (or `1`) turns on debug-level logs. API responses are the same either way: internal error details are only ever written to the log, next to the request's `X-Request-Id`.
 
 See [`config.example.yaml`](config.example.yaml) for a commented example.
 
@@ -117,12 +117,10 @@ See [`config.example.yaml`](config.example.yaml) for a commented example.
 
 | Setting | Description |
 |---------|-------------|
-| `server.port` | API port; HTTP, or HTTPS when TLS is configured |
-| `server.tls_cert` | Path to the TLS certificate (PEM); set together with `tls_key` |
-| `server.tls_key` | Path to the TLS private key (PEM); set together with `tls_cert` |
-| `server.allowed_ips` | Optional IPv4/IPv6 addresses or CIDRs. When set, only these clients can call protected endpoints. Behind a reverse proxy on another host or container, also set `trusted_proxies` |
-| `server.trusted_proxies` | Optional addresses or CIDRs of reverse proxies allowed to set `X-Forwarded-For`. Empty means only loopback is trusted |
-| `auth.api_key` | API key for all protected endpoints |
+| `server.port` | API port. The API is plain HTTP; see [Deployment](#deployment) for HTTPS |
+| `auth.api_key` | API key for all protected endpoints, at least 32 characters |
+
+The node has no TLS, IP allowlist or rate limit settings. Put those in the reverse proxy in front of it, where they are easier to configure and to change. `server.tls_cert`, `server.tls_key`, `server.allowed_ips` and `server.trusted_proxies` were removed in 1.4.0; the node refuses to start if the config still has them, so a setup that relied on them is never silently left unprotected.
 
 ### WireGuard
 
@@ -134,8 +132,8 @@ See [`config.example.yaml`](config.example.yaml) for a commented example.
 | `wireguard.server_ip` | Optional IPv4 address of the server inside `subnet` |
 | `wireguard.subnet6` | IPv6 CIDR for peer addresses, prefix up to `/126` |
 | `wireguard.server_ip6` | Optional IPv6 address of the server inside `subnet6` |
-| `wireguard.routing.wan_interface` | Outbound interface used in the NAT rules, for example `eth0`. Letters, digits, `-`, `_` and `.` only |
-| `wireguard.peer_store_file` | Optional path to a bbolt file for [persistent peers](#peer-store-persistence) |
+| `wireguard.routing.wan_interface` | Optional outbound interface for the NAT rules, for example `eth0`. When unset, the interface of the default route is used (IPv4 first, then IPv6). Set it for policy routing or when the default route is not the way out. Letters, digits, `-`, `_` and `.` only |
+| `wireguard.peer_store_file` | Optional path of the [peer store](#peer-store-persistence). Default `/var/lib/wgkeeper/peers.db` |
 
 Metrics settings are described in [Metrics](#metrics).
 
@@ -143,53 +141,51 @@ Metrics settings are described in [Metrics](#metrics).
 
 ### Docker Compose (local)
 
-[`docker-compose.local.yml`](docker-compose.local.yml) runs `ghcr.io/wgkeeper/node` with `NET_ADMIN` and `SYS_MODULE`, mounts `config.yaml` and `./wireguard`, publishes `51820/udp` and `51821`, and sets the IPv4/IPv6 forwarding sysctls on an IPv6-capable network. Use the `edge` tag for the latest build from `main`.
+[`docker-compose.local.yml`](docker-compose.local.yml) runs `ghcr.io/wgkeeper/node` with `NET_ADMIN` and `SYS_MODULE`, mounts `config.yaml` and `./wireguard`, publishes `51820/udp` on all interfaces and the API on `127.0.0.1:51821` only, and sets the IPv4/IPv6 forwarding sysctls on an IPv6-capable network. Use the `edge` tag for the latest build from `main`.
 
 ```bash
 cp config.example.yaml config.yaml
 docker compose -f docker-compose.local.yml up -d
 ```
 
-For HTTPS, put the certificate and key in `./certs/` and set `server.tls_cert` and `server.tls_key`. If you don't use TLS, you can remove the `./certs:/app/certs:ro` volume.
+This setup is for trying the node on the same machine. For access from another host, use the Caddy setup below.
 
 ### Docker Compose with Caddy (production)
 
-[`docker-compose.prod-secure.yml`](docker-compose.prod-secure.yml) does not publish the API port on the host. [Caddy](https://caddyserver.com) is the only HTTP(S) entry point and proxies to the node over the Docker network.
+[`docker-compose.prod-secure.yml`](docker-compose.prod-secure.yml) puts [Caddy](https://caddyserver.com) in front of the node. Caddy runs in the node container's network namespace, reaches the API on `127.0.0.1:51821`, and is the only HTTP(S) entry point. The API port is never published.
 
-| Service | Host ports | Internal |
-|---------|-----------|----------|
-| `wireguard` | `51820/udp` | API on `51821`, Docker network only |
-| `caddy` | `80`, `443` | Proxies to `wireguard:51821` |
+| Published port | Served by |
+|----------------|-----------|
+| `51820/udp` | WireGuard |
+| `80`, `443` | Caddy: HTTPS with an automatic Let's Encrypt certificate, proxied to the API |
 
 ```bash
 docker compose -f docker-compose.prod-secure.yml up -d
 ```
 
-Example `Caddyfile`:
+Edit the [`Caddyfile`](Caddyfile) before starting:
 
 ```Caddyfile
-# Replace :443 with your domain for automatic HTTPS
-:443 {
+api.example.com {
     encode gzip zstd
-    reverse_proxy wireguard:51821
+
+    # Optional: allow only your orchestrator
+    # @blocked not remote_ip 203.0.113.7
+    # abort @blocked
+
+    reverse_proxy 127.0.0.1:51821
 }
 ```
 
 For production:
 
 - Use a long random `auth.api_key`.
-- Allow ports `80` and `443` in the firewall only from your orchestrator. In this setup that is the main network control.
-- Point a domain at the node (for example `api.example.com`) and put it in the `Caddyfile` instead of `:443`. Caddy gets a Let's Encrypt certificate when ports 80 and 443 are reachable.
-- If you change `server.port`, change `reverse_proxy wireguard:<port>` to match.
-- If you use `server.allowed_ips`, also set `server.trusted_proxies` to the Docker bridge subnet. Caddy reaches the node from its own container, so without it the node compares Caddy's address, not your orchestrator's, against the allowlist and rejects every request:
+- Replace `api.example.com` with a domain pointing at the node. Caddy gets the certificate once ports 80 and 443 are reachable.
+- Allow ports `80` and `443` in the firewall only from your orchestrator, or uncomment the `remote_ip` block above. Caddy sees the real client address, so no extra node settings are needed.
+- If you change `server.port`, change `reverse_proxy 127.0.0.1:<port>` to match.
+- If the `wireguard` container is recreated, restart `caddy` too: it shares that container's network namespace.
 
-  ```yaml
-  server:
-    allowed_ips:
-      - "203.0.113.7"        # your orchestrator
-    trusted_proxies:
-      - "172.18.0.0/16"      # Docker bridge where Caddy runs (networks: in the compose file)
-  ```
+nginx or another proxy works the same way: terminate TLS there, filter clients there, and proxy to the node on loopback or a private network.
 
 ### From source
 
@@ -259,7 +255,7 @@ Removes the peer from the interface and from the peer store. Returns `404` if th
 
 ## Peer store persistence
 
-By default peers live in memory and are lost on restart. To keep them, set `wireguard.peer_store_file` to a writable path, for example `/var/lib/wgkeeper/peers.db`. In Docker, use `/app/peers/peers.db` and mount `./peers:/app/peers`.
+Peers are always stored in a bbolt file, `/var/lib/wgkeeper/peers.db` unless `wireguard.peer_store_file` says otherwise. The node creates the file and its directory on first start. Both compose files mount `./data` there; keep that volume, or every peer is lost when the container is recreated.
 
 The store is the source of truth. On startup the node reconciles the device with it in both directions: peers in the store but missing on the device are added, and peers on the device whose key is not in the store are removed. This also cleans up after a crash in the middle of a write and after manual `wg set` changes: anything not created through the API is gone after a restart.
 
@@ -267,7 +263,7 @@ Every create, rotate and delete is written to bbolt before the device is changed
 
 | Event | What happens |
 |-------|-----------|
-| Startup, file missing | Starts with an empty store and removes all peers from the device |
+| Startup, file missing | Creates an empty store and removes all peers from the device |
 | Startup, file corrupted or has duplicate `peer_id` / `public_key` | Startup fails with an error |
 | Startup, file valid | Adds stored peers to the device, removes device peers that are not in the store, removes peers outside the configured subnets |
 | Peer created, rotated or deleted | Written to the store first, rolled back if the device change fails |
@@ -309,49 +305,27 @@ The `path` label is the route template, such as `/peers/:peerId`, so peer IDs do
 
 A sample [`prometheus.yml`](docs/prometheus.example.yml) and a [Grafana dashboard](docs/grafana-dashboard.json) are in `docs/`.
 
-### Per-peer metrics
-
-`metrics.per_peer: true` adds:
-
-| Metric | Type | Labels |
-|--------|------|--------|
-| `wgkeeper_peer_rx_bytes_total` | counter | `peer_id`, `allowed_ip` |
-| `wgkeeper_peer_tx_bytes_total` | counter | `peer_id`, `allowed_ip` |
-| `wgkeeper_peer_last_handshake_seconds` | gauge (age) | `peer_id`, `allowed_ip` |
-| `wgkeeper_peers_capped` | gauge | |
-
-`metrics.per_peer_max` (default `100`) limits the number of peers exported: the node keeps the peers with the most traffic in the current scrape interval. The rest are still available through `GET /peers/:peerId`, and `wgkeeper_peers_capped` shows how many were left out.
-
-| Active peers | Suggested `per_peer_max` | Series | Storage for 30 days |
-|--------------|----------------------------|--------------|----------------|
-| under 500 | 500 | ~1,500 | ~30 MB |
-| 500 to 2,000 | 200 | ~600 | ~13 MB |
-| 2,000 to 10,000 | 100 (default) | ~300 | ~7 MB |
-| over 10,000 | 50 | ~150 | ~3 MB |
-| over 50,000 | keep `per_peer: false` and use `GET /peers/:peerId` | | |
-
-With many nodes and thousands of peers each, consider `vmagent` with `remote_write` to VictoriaMetrics or Grafana Mimir.
+Per-peer traffic and handshakes are not exported as metrics: a series per peer grows with every peer and flaps as peers come and go. Use `GET /peers` and `GET /peers/:peerId` for them.
 
 ### Keep the metrics port private
 
 The metrics endpoint listens on all interfaces. Peer counts, the version and capacity tell an attacker a lot, so don't expose it to the internet even with the token:
 
 - **Docker:** don't add `9090:9090` to `ports:`. Run Prometheus in the same Compose project and scrape `wireguard:9090` over the Docker network. `docker-compose.local.yml` has a commented-out Prometheus service for this.
-- **Docker with Caddy:** same as above. If Prometheus runs elsewhere, add a separate Caddy site (for example `metrics.example.com`) with client certificate (mTLS) auth that proxies to `wireguard:9090`.
+- **Docker with Caddy:** same as above. If Prometheus runs elsewhere, add a separate Caddy site (for example `metrics.example.com`) with client certificate (mTLS) auth that proxies to `127.0.0.1:9090`.
 - **Bare metal:** allow `9090/tcp` in the firewall only from `127.0.0.1` or your Prometheus host.
 
 ## Security
 
 | Mechanism | Details |
 |-----------|---------|
-| API key | Required on every endpoint except `/healthz` and `/readyz` (`X-API-Key`) |
-| IP allowlist | `server.allowed_ips`; when set, a request must pass both the allowlist and the API key |
-| Trusted proxies | Only `127.0.0.1` and `::1` may set `X-Forwarded-For` unless `server.trusted_proxies` says otherwise, so clients can't spoof their address. See [Docker Compose with Caddy](#docker-compose-with-caddy-production) |
-| Rate limiting | 20 requests per second per client IP, burst 30; off when an allowlist is configured |
+| API key | Required on every endpoint except `/healthz` and `/readyz` (`X-API-Key`), compared in constant time, at least 32 characters |
+| Error details | Logged with the request ID, never returned to the client |
+| HTTPS, IP filtering, rate limiting | In the reverse proxy; see [Docker Compose with Caddy](#docker-compose-with-caddy-production). The node only trusts `X-Forwarded-For` from loopback and uses the client address for logs only |
 | Body limit | 256 KB; larger requests get `413` |
 | Input validation | Peer IDs must be UUID v4; `offset` and `limit` are range-checked |
-| Config validation | `wireguard.routing.wan_interface` is restricted to a safe character set because it is used in iptables rules |
-| Security headers | `X-Content-Type-Options`, `X-Frame-Options`, `X-XSS-Protection`, `Referrer-Policy`, and `Strict-Transport-Security` with TLS |
+| Config validation | `wireguard.routing.wan_interface`, set or detected, is restricted to a safe character set because it is used in iptables rules |
+| Security headers | `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`; HSTS comes from the proxy that terminates TLS |
 | Files on disk | WireGuard config and peer store are written with mode `0600`; private keys of peers are never stored |
 | Release images | Signed build provenance and an SBOM; see [SECURITY.md](SECURITY.md#verifying-images) |
 

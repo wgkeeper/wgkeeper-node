@@ -36,9 +36,9 @@ func init() {
 
 func newBenchRouter(svc mockWGService) *gin.Engine {
 	r := gin.New()
-	r.POST(benchPeersPath, apiKeyMiddleware(testAPIKey), createPeerHandler(svc, nil, false))
-	r.GET(benchPeersPath, apiKeyMiddleware(testAPIKey), listPeersHandler(svc, false))
-	r.GET(benchPeersPath+"/:peerId", apiKeyMiddleware(testAPIKey), getPeerHandler(svc, false))
+	r.POST(benchPeersPath, apiKeyMiddleware(testAPIKey), createPeerHandler(svc, nil))
+	r.GET(benchPeersPath, apiKeyMiddleware(testAPIKey), listPeersHandler(svc))
+	r.GET(benchPeersPath+"/:peerId", apiKeyMiddleware(testAPIKey), getPeerHandler(svc))
 	return r
 }
 

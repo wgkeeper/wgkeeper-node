@@ -6,9 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
 	"net"
 	"os"
+	"path/filepath"
 	"slices"
 	"sync"
 	"time"
@@ -89,7 +89,7 @@ type WireGuardService struct {
 	subnet6     *net.IPNet
 	serverIP6   net.IP
 	store       *PeerStore
-	persistPath string // if set, peer store is persisted to this file
+	persistPath string // bbolt file the store is persisted to; empty only in tests
 	// rollbackObs receives persist-rollback notifications when set. May be nil
 	// (metrics disabled). All call sites must nil-check before invoking.
 	rollbackObs RollbackObserver
@@ -200,63 +200,6 @@ func (s *WireGuardService) WireGuardSnapshot() (WireGuardSnapshot, error) {
 	return snap, nil
 }
 
-// PeerSnapshot is a per-peer view of kernel-level state, joined with the peer
-// store so callers see peer_id and allowed IPs alongside the netlink counters.
-// Cardinality of any metric labelled by these fields scales with peer count —
-// metrics consumers must apply a top-N cap.
-type PeerSnapshot struct {
-	PeerID    string
-	AllowedIP string // primary IP from the store record (first allowed_ips entry); used as a low-cardinality companion label
-	// ReceiveBytes / TransmitBytes mirror kernel counters since interface bring-up.
-	ReceiveBytes  int64
-	TransmitBytes int64
-	// LastHandshakeAgeSeconds is "now - last_handshake_time". math.Inf(+1) when
-	// the peer has never handshaken. Kept as age (not absolute timestamp) so
-	// dashboards do not need to compute deltas in PromQL.
-	LastHandshakeAgeSeconds float64
-}
-
-// PeersSnapshot returns one PeerSnapshot per peer present both on the device
-// and in the store. Peers present on the device but not in the store (orphans)
-// are skipped — they would have no peer_id label. Reuses the device cache,
-// matches device peers to store records by public key in O(N).
-func (s *WireGuardService) PeersSnapshot() ([]PeerSnapshot, error) {
-	dev, err := s.cachedDevice()
-	if err != nil {
-		return nil, err
-	}
-	byKey := make(map[wgtypes.Key]PeerRecord)
-	s.store.ForEach(func(rec PeerRecord) {
-		byKey[rec.PublicKey] = rec
-	})
-	now := time.Now()
-	out := make([]PeerSnapshot, 0, len(dev.Peers))
-	for _, p := range dev.Peers {
-		rec, ok := byKey[p.PublicKey]
-		if !ok {
-			// Orphan on device — startup reconcile will remove. Skip from
-			// metrics so dashboards don't show a peer with no peer_id.
-			continue
-		}
-		var primaryIP string
-		if len(rec.AllowedIPs) > 0 {
-			primaryIP = rec.AllowedIPs[0].String()
-		}
-		age := math.Inf(+1)
-		if !p.LastHandshakeTime.IsZero() {
-			age = now.Sub(p.LastHandshakeTime).Seconds()
-		}
-		out = append(out, PeerSnapshot{
-			PeerID:                  rec.PeerID,
-			AllowedIP:               primaryIP,
-			ReceiveBytes:            p.ReceiveBytes,
-			TransmitBytes:           p.TransmitBytes,
-			LastHandshakeAgeSeconds: age,
-		})
-	}
-	return out, nil
-}
-
 func NewWireGuardService(cfg config.Config) (*WireGuardService, error) {
 	client, err := wgctrl.New()
 	if err != nil {
@@ -332,7 +275,11 @@ func initPersistStore(svc *WireGuardService) error {
 	if err == nil && info.IsDir() {
 		return fmt.Errorf("wireguard.peer_store_file must not be a directory: %s", svc.persistPath)
 	}
-	if err := svc.store.OpenFileIfExists(svc.persistPath); err != nil {
+	if err := os.MkdirAll(filepath.Dir(svc.persistPath), 0o700); err != nil {
+		return fmt.Errorf("create peer store directory: %w", err)
+	}
+	// OpenFile creates the file on first start; a missing file is an empty store.
+	if err := svc.store.OpenFile(svc.persistPath); err != nil {
 		return fmt.Errorf("load peer store: %w", err)
 	}
 	if err := svc.reconcileStoreWithDevice(); err != nil {

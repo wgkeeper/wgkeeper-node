@@ -162,26 +162,30 @@ func mustParseCIDRs(t *testing.T, cidrs ...string) []net.IPNet {
 	return out
 }
 
-func TestLoadFromFileIfExistsMissingFile(t *testing.T) {
+func TestOpenFileCreatesMissingFile(t *testing.T) {
 	store := NewPeerStore()
 	path := filepath.Join(t.TempDir(), "nonexistent.db")
-	if err := store.OpenFileIfExists(path); err != nil {
-		t.Fatalf("OpenFileIfExists(missing): expected nil, got %v", err)
+	if err := store.OpenFile(path); err != nil {
+		t.Fatalf("OpenFile(missing): expected nil, got %v", err)
 	}
+	defer store.Close()
 	if len(store.List()) != 0 {
 		t.Fatalf("expected empty store after missing file, got %d", len(store.List()))
 	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected OpenFile to create %s: %v", path, err)
+	}
 }
 
-func TestLoadFromFileIfExistsEmptyFile(t *testing.T) {
+func TestOpenFileEmptyFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, testPeersFile)
 	if err := os.WriteFile(path, nil, 0o600); err != nil {
 		t.Fatalf("write empty file: %v", err)
 	}
 	store := NewPeerStore()
-	if err := store.OpenFileIfExists(path); err != nil {
-		t.Fatalf("OpenFileIfExists(empty file): expected nil, got %v", err)
+	if err := store.OpenFile(path); err != nil {
+		t.Fatalf("OpenFile(empty file): expected nil, got %v", err)
 	}
 	defer store.Close()
 }
@@ -347,7 +351,7 @@ func TestSaveToFileUnwritablePath(t *testing.T) {
 	}
 }
 
-func TestLoadFromFileIfExistsPermissionError(t *testing.T) {
+func TestOpenFilePermissionError(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("running as root, cannot test permission errors")
 	}
@@ -357,8 +361,8 @@ func TestLoadFromFileIfExistsPermissionError(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 	store := NewPeerStore()
-	if store.OpenFileIfExists(path) == nil {
-		t.Fatal("expected error for permission-denied file (non-ErrNotExist)")
+	if store.OpenFile(path) == nil {
+		t.Fatal("expected error for permission-denied file")
 	}
 }
 

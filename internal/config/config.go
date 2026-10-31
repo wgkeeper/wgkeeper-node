@@ -17,42 +17,28 @@ import (
 var validNetworkInterface = regexp.MustCompile(`^[a-zA-Z0-9\-_.]+$`)
 
 const (
+	// DefaultPeerStoreFile is where peers are persisted unless
+	// wireguard.peer_store_file says otherwise. Peers are always persisted:
+	// the interface is recreated on restart, so an in-memory store would drop
+	// every peer while the orchestrator still believes they exist.
+	DefaultPeerStoreFile = "/var/lib/wgkeeper/peers.db"
+
 	errMsgRequired        = "%s is required"
 	minAPIKeyLength       = 32
 	minMetricsTokenLength = 32
-
-	// defaultMetricsPerPeerMax caps the per-peer metrics series count when
-	// per_peer is enabled but per_peer_max is left unset. Conservative — the
-	// safe upper bound for nodes serving a few thousand peers without putting
-	// pressure on Prometheus retention.
-	defaultMetricsPerPeerMax = 100
-
-	// maxMetricsPerPeerMax is a sanity ceiling: anything larger and the
-	// operator should reconsider topology (federation / VictoriaMetrics push)
-	// rather than crank the cap.
-	maxMetricsPerPeerMax = 100000
 )
 
 type Config struct {
-	Port        int
-	APIKey      string
-	TLSCertFile string       // path to TLS certificate (PEM); if set, TLSKeyFile must be set too
-	TLSKeyFile  string       // path to TLS private key (PEM)
-	AllowedNets []*net.IPNet // optional: if non-empty, only these IPs/CIDRs may reach the API
-	// TrustedProxies lists the reverse-proxy IPs/CIDRs whose X-Forwarded-For
-	// header is trusted to carry the real client IP. Empty = trust only loopback
-	// (127.0.0.1, ::1). Set this to the network of a non-loopback reverse proxy
-	// (e.g. a Caddy container's docker-bridge subnet) so that allowed_ips and
-	// per-IP rate limiting see the real client instead of the proxy address.
-	TrustedProxies []string
-	WGInterface    string
-	WGSubnet       string // IPv4 CIDR (optional if WGSubnet6 is set)
-	WGServerIP     string // IPv4 server address (optional)
-	WGSubnet6      string // IPv6 CIDR (optional if WGSubnet is set)
-	WGServerIP6    string // IPv6 server address (optional)
-	WGListenPort   int
-	WANInterface   string
-	PeerStoreFile  string // optional: path to bbolt DB file for persistent peer store; empty = in-memory only
+	Port          int
+	APIKey        string
+	WGInterface   string
+	WGSubnet      string // IPv4 CIDR (optional if WGSubnet6 is set)
+	WGServerIP    string // IPv4 server address (optional)
+	WGSubnet6     string // IPv6 CIDR (optional if WGSubnet is set)
+	WGServerIP6   string // IPv6 server address (optional)
+	WGListenPort  int
+	WANInterface  string
+	PeerStoreFile string // bbolt DB file the peer store is persisted to; always set
 
 	// MetricsPort is the TCP port for the optional Prometheus /metrics
 	// endpoint. Zero disables the endpoint entirely (no listener is created).
@@ -63,18 +49,6 @@ type Config struct {
 	// distinct secret from APIKey: compromise of the scrape token must not
 	// grant peer-management access. Required when MetricsPort > 0.
 	MetricsToken string
-
-	// MetricsPerPeer toggles the per-peer Prometheus metrics
-	// (wgkeeper_peer_rx_bytes_total / tx / last_handshake_seconds). Off by
-	// default — enabling expands cardinality with peer count.
-	MetricsPerPeer bool
-
-	// MetricsPerPeerMax caps the number of peers exposed in per-peer metrics
-	// to bound cardinality. The collector keeps the top-N peers by current
-	// scrape-window traffic; quieter peers fall out of metrics but remain
-	// visible via the REST API. Defaults to defaultMetricsPerPeerMax when
-	// MetricsPerPeer is true.
-	MetricsPerPeerMax int
 }
 
 type wireguardRouting struct {
@@ -83,7 +57,11 @@ type wireguardRouting struct {
 
 type fileConfig struct {
 	Server struct {
-		Port           string   `yaml:"port"`
+		Port string `yaml:"port"`
+
+		// Removed in 1.4.0: TLS, IP filtering and proxy trust belong in the
+		// reverse proxy. Still parsed so that an old config fails loudly
+		// instead of silently running without the protection it asks for.
 		TLSCert        string   `yaml:"tls_cert"`
 		TLSKey         string   `yaml:"tls_key"`
 		AllowedIPs     []string `yaml:"allowed_ips"`
@@ -103,10 +81,13 @@ type fileConfig struct {
 		PeerStoreFile string           `yaml:"peer_store_file"`
 	} `yaml:"wireguard"`
 	Metrics struct {
-		Port       int    `yaml:"port"`
-		Token      string `yaml:"token"`
-		PerPeer    bool   `yaml:"per_peer"`
-		PerPeerMax int    `yaml:"per_peer_max"`
+		Port  int    `yaml:"port"`
+		Token string `yaml:"token"`
+
+		// Removed in 1.4.0 together with per-peer metrics; parsed only to
+		// reject old configs with a clear error.
+		PerPeer    *bool `yaml:"per_peer"`
+		PerPeerMax *int  `yaml:"per_peer_max"`
 	} `yaml:"metrics"`
 }
 
@@ -141,7 +122,7 @@ func loadConfigFile(path string) (Config, error) {
 	if err := yaml.Unmarshal(raw, &fc); err != nil {
 		return Config{}, fmt.Errorf("parse config: %w", err)
 	}
-	portValue, apiKey, tlsCert, tlsKey, allowedNets, trustedProxies, err := parseServerAndAuth(fc)
+	portValue, apiKey, err := parseServerAndAuth(fc)
 	if err != nil {
 		return Config{}, err
 	}
@@ -149,29 +130,23 @@ func loadConfigFile(path string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	metricsPort, metricsToken, perPeer, perPeerMax, err := parseMetrics(fc)
+	metricsPort, metricsToken, err := parseMetrics(fc)
 	if err != nil {
 		return Config{}, err
 	}
 	return Config{
-		Port:              portValue,
-		APIKey:            apiKey,
-		TLSCertFile:       tlsCert,
-		TLSKeyFile:        tlsKey,
-		AllowedNets:       allowedNets,
-		TrustedProxies:    trustedProxies,
-		WGInterface:       wgInterface,
-		WGSubnet:          wgSubnet,
-		WGServerIP:        wgServerIP,
-		WGSubnet6:         wgSubnet6,
-		WGServerIP6:       wgServerIP6,
-		WGListenPort:      wgListenPort,
-		WANInterface:      wanInterface,
-		PeerStoreFile:     strings.TrimSpace(peerStoreFile),
-		MetricsPort:       metricsPort,
-		MetricsToken:      metricsToken,
-		MetricsPerPeer:    perPeer,
-		MetricsPerPeerMax: perPeerMax,
+		Port:          portValue,
+		APIKey:        apiKey,
+		WGInterface:   wgInterface,
+		WGSubnet:      wgSubnet,
+		WGServerIP:    wgServerIP,
+		WGSubnet6:     wgSubnet6,
+		WGServerIP6:   wgServerIP6,
+		WGListenPort:  wgListenPort,
+		WANInterface:  wanInterface,
+		PeerStoreFile: peerStoreFile,
+		MetricsPort:   metricsPort,
+		MetricsToken:  metricsToken,
 	}, nil
 }
 
@@ -179,40 +154,26 @@ func loadConfigFile(path string) (Config, error) {
 // (port == 0). When enabled, the token is mandatory and must meet the same
 // minimum length as auth.api_key — refusing the unauthenticated configuration
 // at startup is the main guarantee of this section.
-//
-// Per-peer metrics (per_peer / per_peer_max) are an opt-in cardinality
-// expansion. When per_peer is true and per_peer_max is unset (0), it defaults
-// to defaultMetricsPerPeerMax. Setting per_peer without metrics.port is a
-// no-op (warned indirectly by being unused).
-func parseMetrics(fc fileConfig) (port int, token string, perPeer bool, perPeerMax int, err error) {
+func parseMetrics(fc fileConfig) (port int, token string, err error) {
+	if fc.Metrics.PerPeer != nil || fc.Metrics.PerPeerMax != nil {
+		return 0, "", fmt.Errorf("metrics.per_peer and metrics.per_peer_max were removed in 1.4.0; use GET /peers for per-peer traffic and handshakes")
+	}
 	port = fc.Metrics.Port
 	token = strings.TrimSpace(fc.Metrics.Token)
-	perPeer = fc.Metrics.PerPeer
-	perPeerMax = fc.Metrics.PerPeerMax
 	if port == 0 {
 		// Endpoint disabled. Token is ignored — no need to validate it.
-		return 0, "", false, 0, nil
+		return 0, "", nil
 	}
 	if port < 1 || port > 65535 {
-		return 0, "", false, 0, fmt.Errorf("metrics.port must be 0 (disabled) or a valid TCP port (1..65535)")
+		return 0, "", fmt.Errorf("metrics.port must be 0 (disabled) or a valid TCP port (1..65535)")
 	}
 	if len(token) < minMetricsTokenLength {
-		return 0, "", false, 0, fmt.Errorf("metrics.token must be at least %d characters when metrics.port is set; do not reuse auth.api_key", minMetricsTokenLength)
+		return 0, "", fmt.Errorf("metrics.token must be at least %d characters when metrics.port is set; do not reuse auth.api_key", minMetricsTokenLength)
 	}
 	if token == fc.Auth.APIKey {
-		return 0, "", false, 0, fmt.Errorf("metrics.token must differ from auth.api_key (use a separate secret for the scrape endpoint)")
+		return 0, "", fmt.Errorf("metrics.token must differ from auth.api_key (use a separate secret for the scrape endpoint)")
 	}
-	if perPeer {
-		if perPeerMax < 0 || perPeerMax > maxMetricsPerPeerMax {
-			return 0, "", false, 0, fmt.Errorf("metrics.per_peer_max must be 0 (default %d) or in [1..%d]", defaultMetricsPerPeerMax, maxMetricsPerPeerMax)
-		}
-		if perPeerMax == 0 {
-			perPeerMax = defaultMetricsPerPeerMax
-		}
-	} else {
-		perPeerMax = 0
-	}
-	return port, token, perPeer, perPeerMax, nil
+	return port, token, nil
 }
 
 // MetricsEnabled reports whether the optional Prometheus /metrics endpoint is
@@ -228,59 +189,38 @@ func (c Config) MetricsAddr() string {
 	return fmt.Sprintf(":%d", c.MetricsPort)
 }
 
-func parseServerAndAuth(fc fileConfig) (portValue int, apiKey, tlsCert, tlsKey string, allowedNets []*net.IPNet, trustedProxies []string, err error) {
+func parseServerAndAuth(fc fileConfig) (portValue int, apiKey string, err error) {
+	if err := rejectRemovedServerKeys(fc); err != nil {
+		return 0, "", err
+	}
 	portValue, err = parsePort("server.port", fc.Server.Port)
 	if err != nil {
-		return 0, "", "", "", nil, nil, err
+		return 0, "", err
 	}
 	apiKey, err = requireString("auth.api_key", fc.Auth.APIKey)
 	if err != nil {
-		return 0, "", "", "", nil, nil, err
+		return 0, "", err
 	}
 	if len(apiKey) < minAPIKeyLength {
-		return 0, "", "", "", nil, nil, fmt.Errorf("auth.api_key must be at least %d characters", minAPIKeyLength)
+		return 0, "", fmt.Errorf("auth.api_key must be at least %d characters", minAPIKeyLength)
 	}
-	tlsCert, tlsKey, err = parseOptionalTLS(fc.Server.TLSCert, fc.Server.TLSKey)
-	if err != nil {
-		return 0, "", "", "", nil, nil, err
-	}
-	allowedNets, err = parseAllowedIPs("server.allowed_ips", fc.Server.AllowedIPs)
-	if err != nil {
-		return 0, "", "", "", nil, nil, err
-	}
-	trustedProxies, err = parseTrustedProxies("server.trusted_proxies", fc.Server.TrustedProxies)
-	if err != nil {
-		return 0, "", "", "", nil, nil, err
-	}
-	return portValue, apiKey, tlsCert, tlsKey, allowedNets, trustedProxies, nil
+	return portValue, apiKey, nil
 }
 
-// parseTrustedProxies validates each entry as an IP address or CIDR and returns
-// the trimmed entries unchanged (gin's SetTrustedProxies consumes raw strings).
-// Returns nil for an empty/absent list — the router then trusts only loopback.
-func parseTrustedProxies(field string, entries []string) ([]string, error) {
-	if len(entries) == 0 {
-		return nil, nil
+// rejectRemovedServerKeys fails on server options removed in 1.4.0. Ignoring
+// them would leave a node that the operator believes is behind TLS or an IP
+// allowlist serving plain, unfiltered HTTP.
+func rejectRemovedServerKeys(fc fileConfig) error {
+	const hint = "removed in 1.4.0; terminate TLS and filter clients in a reverse proxy such as Caddy or nginx (see README)"
+	switch {
+	case strings.TrimSpace(fc.Server.TLSCert) != "" || strings.TrimSpace(fc.Server.TLSKey) != "":
+		return fmt.Errorf("server.tls_cert and server.tls_key were %s", hint)
+	case len(fc.Server.AllowedIPs) > 0:
+		return fmt.Errorf("server.allowed_ips was %s", hint)
+	case len(fc.Server.TrustedProxies) > 0:
+		return fmt.Errorf("server.trusted_proxies was %s", hint)
 	}
-	out := make([]string, 0, len(entries))
-	for i, raw := range entries {
-		s := strings.TrimSpace(raw)
-		if s == "" {
-			continue
-		}
-		if strings.Contains(s, "/") {
-			if _, _, err := net.ParseCIDR(s); err != nil {
-				return nil, fmt.Errorf("%s[%d]: invalid CIDR %q: %w", field, i, s, err)
-			}
-		} else if net.ParseIP(s) == nil {
-			return nil, fmt.Errorf("%s[%d]: invalid IP address %q", field, i, s)
-		}
-		out = append(out, s)
-	}
-	if len(out) == 0 {
-		return nil, nil
-	}
-	return out, nil
+	return nil
 }
 
 func parseWireGuard(fc fileConfig) (wgSubnet, wgSubnet6, wgInterface, wgServerIP, wgServerIP6, wanInterface string, wgListenPort int, peerStoreFile string, err error) {
@@ -311,12 +251,20 @@ func parseWireGuard(fc fileConfig) (wgSubnet, wgSubnet6, wgInterface, wgServerIP
 	if err != nil {
 		return "", "", "", "", "", "", 0, "", err
 	}
-	wanInterface, err = requireNetworkInterface("wireguard.routing.wan_interface", fc.WireGuard.Routing.WANInterface)
+	wanInterface, err = optionalNetworkInterface("wireguard.routing.wan_interface", fc.WireGuard.Routing.WANInterface)
 	if err != nil {
 		return "", "", "", "", "", "", 0, "", err
 	}
-	peerStoreFile = strings.TrimSpace(fc.WireGuard.PeerStoreFile)
+	peerStoreFile = parsePeerStoreFile(fc.WireGuard.PeerStoreFile)
 	return wgSubnet, wgSubnet6, wgInterface, wgServerIP, wgServerIP6, wanInterface, wgListenPort, peerStoreFile, nil
+}
+
+// parsePeerStoreFile returns the bbolt path, DefaultPeerStoreFile when unset.
+func parsePeerStoreFile(value string) string {
+	if path := strings.TrimSpace(value); path != "" {
+		return path
+	}
+	return DefaultPeerStoreFile
 }
 
 func validateWireGuardSubnets(wgSubnet, wgSubnet6 string) error {
@@ -364,27 +312,6 @@ func validateWireGuardSubnet6(wgSubnet6 string) error {
 	return nil
 }
 
-// TLSEnabled reports whether TLS (HTTPS) is configured (both cert and key are set).
-func (c Config) TLSEnabled() bool {
-	return c.TLSCertFile != "" && c.TLSKeyFile != ""
-}
-
-// parseOptionalTLS returns cert and key paths. Both must be set or both unset; otherwise returns error.
-func parseOptionalTLS(cert, key string) (certPath, keyPath string, err error) {
-	certPath = strings.TrimSpace(cert)
-	keyPath = strings.TrimSpace(key)
-	if certPath == "" && keyPath == "" {
-		return "", "", nil
-	}
-	if certPath == "" {
-		return "", "", fmt.Errorf("server.tls_key is set but server.tls_cert is missing; set both for HTTPS")
-	}
-	if keyPath == "" {
-		return "", "", fmt.Errorf("server.tls_cert is set but server.tls_key is missing; set both for HTTPS")
-	}
-	return certPath, keyPath, nil
-}
-
 func (c Config) Addr() string {
 	return fmt.Sprintf("0.0.0.0:%d", c.Port)
 }
@@ -397,17 +324,23 @@ func requireString(field, value string) (string, error) {
 	return out, nil
 }
 
-// requireNetworkInterface validates that the value is a non-empty, safe Linux network interface name.
-// This prevents command injection when the value is interpolated into iptables PostUp/PostDown rules.
-func requireNetworkInterface(field, value string) (string, error) {
-	out, err := requireString(field, value)
-	if err != nil {
-		return "", err
+// optionalNetworkInterface validates a Linux network interface name. Empty
+// means "detect from the default route" (see wireguard.EnsureWireGuardConfig).
+func optionalNetworkInterface(field, value string) (string, error) {
+	out := strings.TrimSpace(value)
+	if out == "" {
+		return "", nil
 	}
-	if !validNetworkInterface.MatchString(out) {
+	if !IsSafeInterfaceName(out) {
 		return "", fmt.Errorf("%s must be a valid network interface name (letters, digits, hyphens, underscores, dots only)", field)
 	}
 	return out, nil
+}
+
+// IsSafeInterfaceName reports whether name is a Linux interface name that is
+// safe to interpolate into the iptables PostUp/PostDown rules.
+func IsSafeInterfaceName(name string) bool {
+	return validNetworkInterface.MatchString(name)
 }
 
 func parsePort(field, value string) (int, error) {
@@ -467,49 +400,4 @@ func optionalIPv6(field, value string) (string, error) {
 		return "", fmt.Errorf("%s must be a valid IPv6 address", field)
 	}
 	return out, nil
-}
-
-// parseAllowedIPs parses a list of IPv4 or IPv6 addresses or CIDRs.
-// Returns nil when the list is empty or nil (no whitelist). Each entry is normalized to *net.IPNet.
-func parseAllowedIPs(field string, entries []string) ([]*net.IPNet, error) {
-	if len(entries) == 0 {
-		return nil, nil
-	}
-	nets := make([]*net.IPNet, 0, len(entries))
-	for i, s := range entries {
-		ipNet, err := parseOneAllowedIP(field, i, strings.TrimSpace(s))
-		if err != nil {
-			return nil, err
-		}
-		if ipNet != nil {
-			nets = append(nets, ipNet)
-		}
-	}
-	if len(nets) == 0 {
-		return nil, nil
-	}
-	return nets, nil
-}
-
-// parseOneAllowedIP parses a single IPv4/IPv6 or CIDR entry. Returns (nil, nil) for empty s (skip).
-func parseOneAllowedIP(field string, index int, s string) (*net.IPNet, error) {
-	if s == "" {
-		return nil, nil
-	}
-	if strings.Contains(s, "/") {
-		_, ipNet, err := net.ParseCIDR(s)
-		if err != nil {
-			return nil, fmt.Errorf("%s[%d]: invalid CIDR %q: %w", field, index, s, err)
-		}
-		return ipNet, nil
-	}
-	ip := net.ParseIP(s)
-	if ip == nil {
-		return nil, fmt.Errorf("%s[%d]: invalid IP address %q", field, index, s)
-	}
-	bits := 32
-	if ip.To4() == nil {
-		bits = 128
-	}
-	return &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)}, nil
 }

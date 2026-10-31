@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -30,15 +31,6 @@ func TestFormatSubnetsLog(t *testing.T) {
 		t.Errorf(testErrGotFmt, got)
 	}
 	if got := formatSubnetsLog(config.Config{WGSubnet: testSubnet4, WGSubnet6: testSubnet6}); got != testSubnet4+","+testSubnet6 {
-		t.Errorf(testErrGotFmt, got)
-	}
-}
-
-func TestProtocolFromConfig(t *testing.T) {
-	if got := protocolFromConfig(config.Config{}); got != "http" {
-		t.Errorf(testErrGotFmt, got)
-	}
-	if got := protocolFromConfig(config.Config{TLSCertFile: "a", TLSKeyFile: "b"}); got != "https" {
 		t.Errorf(testErrGotFmt, got)
 	}
 }
@@ -77,6 +69,15 @@ func TestSetupGinMode(t *testing.T) {
 	// just verify it doesn't panic in both modes
 	setupGinMode(false)
 	setupGinMode(true)
+}
+
+func TestLogLevel(t *testing.T) {
+	if got := logLevel(false); got != slog.LevelInfo {
+		t.Errorf("logLevel(false) = %v, want INFO", got)
+	}
+	if got := logLevel(true); got != slog.LevelDebug {
+		t.Errorf("logLevel(true) = %v, want DEBUG", got)
+	}
 }
 
 func TestHandleInitNoArgs(t *testing.T) {

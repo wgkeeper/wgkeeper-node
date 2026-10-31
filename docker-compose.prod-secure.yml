@@ -8,19 +8,18 @@ services:
     volumes:
       - ./config.yaml:/app/config.yaml:ro
       - ./wireguard:/etc/wireguard
-      - ./certs:/app/certs:ro
-    # Optional: persist peer store (set wireguard.peer_store_file: "/app/peers/peers.db" in config)
-    # - ./peers:/app/peers
-    # In production we expose only the WireGuard UDP port on the host.
-    # The REST API port (51821) stays internal to the Docker network and is
-    # only reachable via the Caddy reverse proxy.
+      # Peer store (bbolt). Keep it: without this volume every peer is lost when the container is recreated.
+      - ./data:/var/lib/wgkeeper
+    # Caddy runs in this container's network namespace, so its ports are
+    # published here. The API (51821) is never published: Caddy reaches it on
+    # 127.0.0.1 and is the only HTTP(S) entry point.
     #
-    # If `metrics:` is enabled in config.yaml, the metrics port lives only
-    # inside this Docker network too. Do NOT publish it on the host. For
-    # external scraping, run a separate Caddy site (e.g. metrics.example.com)
-    # with mTLS, or run Prometheus in this same compose.
+    # If `metrics:` is enabled in config.yaml, do NOT publish the metrics port
+    # either. Run Prometheus in this compose project and scrape wireguard:9090.
     ports:
       - "51820:51820/udp"
+      - "80:80"
+      - "443:443"
     sysctls:
       - net.ipv4.conf.all.src_valid_mark=1
       - net.ipv4.ip_forward=1
@@ -35,23 +34,17 @@ services:
       start_period: 10s
 
   caddy:
-    # Production reverse proxy: the only public HTTP(S) entrypoint.
-    # Combine with auth.api_key in config.yaml and restrict 80/443 on the host
-    # via firewall / security group.
+    # TLS, client IP filtering and any rate limiting live here, in the Caddyfile.
+    # Restrict 80/443 on the host to your orchestrator via firewall as well.
     #
-    # NOTE: Caddy reaches the API over the docker bridge below (not loopback),
-    # so if you use server.allowed_ips you MUST also set server.trusted_proxies
-    # to the bridge subnet (172.18.0.0/16) — otherwise allowed_ips compares your
-    # orchestrator's IP against Caddy's container IP and rejects every request.
-    # See README → Deployment → production with Caddy.
+    # Sharing the node's network namespace means Caddy connects to the API from
+    # loopback. If the wireguard container is recreated, restart Caddy too.
     image: caddy:2
     restart: unless-stopped
+    network_mode: "service:wireguard"
     depends_on:
       wireguard:
         condition: service_healthy
-    ports:
-      - "80:80"
-      - "443:443"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

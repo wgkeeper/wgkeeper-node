@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -248,18 +247,6 @@ func (s *PeerStore) OpenFile(path string) error {
 	}
 	s.db = db
 	return nil
-}
-
-// OpenFileIfExists is like OpenFile but returns nil without opening if the file
-// does not exist.
-func (s *PeerStore) OpenFileIfExists(path string) error {
-	if _, err := os.Stat(path); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return err
-	}
-	return s.OpenFile(path)
 }
 
 // Close closes the underlying bbolt DB. Safe to call when no DB is open.

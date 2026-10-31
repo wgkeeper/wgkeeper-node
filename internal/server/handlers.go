@@ -65,11 +65,11 @@ func readinessHandler(wgService statsProvider) gin.HandlerFunc {
 	}
 }
 
-func statsHandler(wgService statsProvider, debug bool) gin.HandlerFunc {
+func statsHandler(wgService statsProvider) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		stats, err := wgService.Stats()
 		if err != nil {
-			writeError(c, http.StatusInternalServerError, "stats unavailable", "stats_unavailable", debug, err)
+			writeError(c, http.StatusInternalServerError, "stats unavailable", "stats_unavailable", err)
 			return
 		}
 
@@ -77,20 +77,20 @@ func statsHandler(wgService statsProvider, debug bool) gin.HandlerFunc {
 	}
 }
 
-func createPeerHandler(wgService wgPeerService, m *metrics.Metrics, debug bool) gin.HandlerFunc {
+func createPeerHandler(wgService wgPeerService, m *metrics.Metrics) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req peerRequest
 		if err := c.ShouldBindJSON(&req); err != nil {
-			writeError(c, http.StatusBadRequest, "invalid json body", "invalid_json", debug, err)
+			writeError(c, http.StatusBadRequest, "invalid json body", "invalid_json", err)
 			return
 		}
 		if !IsUUIDv4(req.PeerID) {
-			writeError(c, http.StatusBadRequest, errMsgPeerIDMustBeUUIDv4, "invalid_peer_id", debug, nil)
+			writeError(c, http.StatusBadRequest, errMsgPeerIDMustBeUUIDv4, "invalid_peer_id", nil)
 			return
 		}
 		expiresAt, err := parseExpiresAt(req.ExpiresAt)
 		if err != nil {
-			writeError(c, http.StatusBadRequest, err.Error(), "invalid_expires_at", debug, err)
+			writeError(c, http.StatusBadRequest, err.Error(), "invalid_expires_at", err)
 			return
 		}
 
@@ -105,25 +105,13 @@ func createPeerHandler(wgService wgPeerService, m *metrics.Metrics, debug bool) 
 		observeOp(m, op, start, err)
 		if err != nil {
 			status, message, reason := peerError(err)
-			slog.Error("peer create failed",
-				"reason", reason,
-				"peerId", req.PeerID,
-				"client_ip", c.ClientIP(),
-				"request_id", GetRequestIDFromContext(c.Request.Context()),
-			)
-			writeError(c, status, message, reason, debug, err)
+			writeError(c, status, message, reason, err, "peerId", req.PeerID)
 			return
 		}
 
 		serverPublicKey, serverListenPort, err := wgService.ServerInfo()
 		if err != nil {
-			slog.Error("peer create failed",
-				"reason", "server_info_unavailable",
-				"peerId", req.PeerID,
-				"client_ip", c.ClientIP(),
-				"request_id", GetRequestIDFromContext(c.Request.Context()),
-			)
-			writeError(c, http.StatusInternalServerError, "server public key unavailable", "server_info_unavailable", debug, err)
+			writeError(c, http.StatusInternalServerError, "server public key unavailable", "server_info_unavailable", err, "peerId", req.PeerID)
 			return
 		}
 
@@ -160,11 +148,11 @@ func createPeerHandler(wgService wgPeerService, m *metrics.Metrics, debug bool) 
 	}
 }
 
-func deletePeerHandler(wgService wgPeerService, m *metrics.Metrics, debug bool) gin.HandlerFunc {
+func deletePeerHandler(wgService wgPeerService, m *metrics.Metrics) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		peerID := c.Param("peerId")
 		if !IsUUIDv4(peerID) {
-			writeError(c, http.StatusBadRequest, errMsgPeerIDMustBeUUIDv4, "invalid_peer_id", debug, nil)
+			writeError(c, http.StatusBadRequest, errMsgPeerIDMustBeUUIDv4, "invalid_peer_id", nil)
 			return
 		}
 
@@ -173,13 +161,7 @@ func deletePeerHandler(wgService wgPeerService, m *metrics.Metrics, debug bool) 
 		observeOp(m, metrics.OpDelete, start, err)
 		if err != nil {
 			status, message, reason := peerError(err)
-			slog.Error("peer delete failed",
-				"reason", reason,
-				"peerId", peerID,
-				"client_ip", c.ClientIP(),
-				"request_id", GetRequestIDFromContext(c.Request.Context()),
-			)
-			writeError(c, status, message, reason, debug, err)
+			writeError(c, status, message, reason, err, "peerId", peerID)
 			return
 		}
 
@@ -193,16 +175,16 @@ func deletePeerHandler(wgService wgPeerService, m *metrics.Metrics, debug bool) 
 	}
 }
 
-func listPeersHandler(wgService wgPeersListProvider, debug bool) gin.HandlerFunc {
+func listPeersHandler(wgService wgPeersListProvider) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if err := validatePaginationParams(c.Query("offset"), c.Query("limit")); err != nil {
-			writeError(c, http.StatusBadRequest, err.Error(), "invalid_pagination", debug, nil)
+			writeError(c, http.StatusBadRequest, err.Error(), "invalid_pagination", nil)
 			return
 		}
 		offset, limit := parsePaginationParams(c.Query("offset"), c.Query("limit"))
 		list, total, err := wgService.ListPeers(offset, limit)
 		if err != nil {
-			writeError(c, http.StatusInternalServerError, "peers list unavailable", "peers_list_unavailable", debug, err)
+			writeError(c, http.StatusInternalServerError, "peers list unavailable", "peers_list_unavailable", err)
 			return
 		}
 		if list == nil {
@@ -271,17 +253,17 @@ func parsePaginationParams(offsetStr, limitStr string) (offset, limit int) {
 	return offset, limit
 }
 
-func getPeerHandler(wgService wgPeerDetailProvider, debug bool) gin.HandlerFunc {
+func getPeerHandler(wgService wgPeerDetailProvider) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		peerID := c.Param("peerId")
 		if !IsUUIDv4(peerID) {
-			writeError(c, http.StatusBadRequest, errMsgPeerIDMustBeUUIDv4, "invalid_peer_id", debug, nil)
+			writeError(c, http.StatusBadRequest, errMsgPeerIDMustBeUUIDv4, "invalid_peer_id", nil)
 			return
 		}
 		detail, err := wgService.GetPeer(peerID)
 		if err != nil {
 			status, message, reason := peerError(err)
-			writeError(c, status, message, reason, debug, err)
+			writeError(c, status, message, reason, err)
 			return
 		}
 		c.JSON(http.StatusOK, detail)
@@ -362,13 +344,27 @@ func peerError(err error) (int, string, string) {
 	return http.StatusInternalServerError, "wireguard operation failed", "wireguard_error"
 }
 
-// writeError sends a JSON error. When debug is true, err.Error() is included as "detail"; set debug=false in production to avoid leaking internal details.
-func writeError(c *gin.Context, status int, message, code string, debug bool, err error) {
-	out := gin.H{"error": message, "code": code}
-	if debug && err != nil {
-		out["detail"] = err.Error()
+// writeError sends a JSON error. Internal details never reach the client:
+// when err is set it is logged with the request ID and attrs instead, so the
+// response's X-Request-Id leads to the full error in the node's log.
+func writeError(c *gin.Context, status int, message, code string, err error, attrs ...any) {
+	if err != nil {
+		level := slog.LevelWarn
+		if status >= http.StatusInternalServerError {
+			level = slog.LevelError
+		}
+		args := append([]any{
+			"request_id", GetRequestID(c),
+			"method", c.Request.Method,
+			"path", c.FullPath(),
+			"status", status,
+			"code", code,
+			"client_ip", c.ClientIP(),
+			"error", err,
+		}, attrs...)
+		slog.Log(c.Request.Context(), level, "request failed", args...)
 	}
-	c.JSON(status, out)
+	c.JSON(status, gin.H{"error": message, "code": code})
 }
 
 type wgPeerService interface {

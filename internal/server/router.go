@@ -1,10 +1,8 @@
 package server
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
-	"net"
 
 	"github.com/wgkeeper/wgkeeper-node/internal/metrics"
 	"github.com/wgkeeper/wgkeeper-node/internal/wireguard"
@@ -12,33 +10,22 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-const debugKey = "debug"
-
-// defaultTrustedProxies is used when no trusted proxies are configured: only
-// loopback is trusted to set X-Forwarded-For, preventing header spoofing from
-// external clients.
-var defaultTrustedProxies = []string{"127.0.0.1", "::1"}
+// loopbackProxies may set X-Forwarded-For: a reverse proxy sharing the node's
+// network namespace (the Caddy setup in docker-compose.prod-secure.yml)
+// connects from loopback. The client IP is only logged; no access decision
+// depends on it.
+var loopbackProxies = []string{"127.0.0.1", "::1"}
 
 // NewRouter builds the API router. m is optional — pass nil when metrics are
-// disabled; handlers nil-check before recording. trustedProxies lists the
-// reverse-proxy IPs/CIDRs allowed to set X-Forwarded-For; empty trusts only
-// loopback (see defaultTrustedProxies). A non-loopback proxy (e.g. a Caddy
-// container) must be listed here, otherwise allowed_ips and per-IP rate
-// limiting see the proxy address instead of the real client.
-func NewRouter(ctx context.Context, apiKey string, allowedNets []*net.IPNet, trustedProxies []string, wgService *wireguard.WireGuardService, m *metrics.Metrics, debug bool) *gin.Engine {
+// disabled; handlers nil-check before recording.
+func NewRouter(apiKey string, wgService *wireguard.WireGuardService, m *metrics.Metrics) *gin.Engine {
 	router := gin.New()
-	proxies := trustedProxies
-	if len(proxies) == 0 {
-		proxies = defaultTrustedProxies
-	}
-	if err := router.SetTrustedProxies(proxies); err != nil {
+	if err := router.SetTrustedProxies(loopbackProxies); err != nil {
 		panic(fmt.Sprintf("set trusted proxies: %v", err))
 	}
 	router.Use(requestIDMiddleware())
 	router.Use(securityHeadersMiddleware())
 	router.Use(bodyLimitMiddleware(MaxRequestBodySize))
-	router.Use(newRateLimitMiddleware(ctx, allowedNets))
-	router.Use(debugMiddleware(debug))
 	// Metrics middleware records request count + duration. Nil-safe: when
 	// metrics are disabled, GinMiddleware returns a no-op so we register it
 	// unconditionally.
@@ -64,27 +51,20 @@ func NewRouter(ctx context.Context, apiKey string, allowedNets []*net.IPNet, tru
 		)
 		return ""
 	}), gin.Recovery())
-	registerRoutes(router, apiKey, allowedNets, wgService, m, debug)
+	registerRoutes(router, apiKey, wgService, m)
 	return router
 }
 
-func debugMiddleware(debug bool) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		c.Set(debugKey, debug)
-		c.Next()
-	}
-}
-
-func registerRoutes(router *gin.Engine, apiKey string, allowedNets []*net.IPNet, wgService *wireguard.WireGuardService, m *metrics.Metrics, debug bool) {
+func registerRoutes(router *gin.Engine, apiKey string, wgService *wireguard.WireGuardService, m *metrics.Metrics) {
 	// Liveness probe: process is up and able to serve requests.
 	router.GET("/healthz", healthHandler)
 	// Readiness probe: WireGuard backend is reachable and stats can be fetched.
 	router.GET("/readyz", readinessHandler(wgService))
-	router.GET("/stats", ipWhitelistMiddleware(allowedNets), apiKeyMiddleware(apiKey), statsHandler(wgService, debug))
+	router.GET("/stats", apiKeyMiddleware(apiKey), statsHandler(wgService))
 
-	peers := router.Group("/peers", ipWhitelistMiddleware(allowedNets), apiKeyMiddleware(apiKey))
-	peers.GET("", listPeersHandler(wgService, debug))
-	peers.GET("/:peerId", getPeerHandler(wgService, debug))
-	peers.POST("", createPeerHandler(wgService, m, debug))
-	peers.DELETE("/:peerId", deletePeerHandler(wgService, m, debug))
+	peers := router.Group("/peers", apiKeyMiddleware(apiKey))
+	peers.GET("", listPeersHandler(wgService))
+	peers.GET("/:peerId", getPeerHandler(wgService))
+	peers.POST("", createPeerHandler(wgService, m))
+	peers.DELETE("/:peerId", deletePeerHandler(wgService, m))
 }

@@ -3,14 +3,17 @@
 	# email you@example.com
 }
 
-api.example.com  {
+# Caddy gets and renews a Let's Encrypt certificate for this domain
+# automatically when ports 80 and 443 are reachable.
+api.example.com {
 	encode gzip zstd
 
-	# If you use your own certificates (paths are just examples)
-    # tls /etc/ssl/certs/api.example.com.crt /etc/ssl/private/api.example.com.key
+	# Optional: allow only your orchestrator. Everyone else is dropped before
+	# reaching the node.
+	# @blocked not remote_ip 203.0.113.7
+	# abort @blocked
 
-	# Forward all HTTP traffic to the wgkeeper-node API inside Docker
-	# Default API port is 51821 (see config.yaml -> server.port)
-	reverse_proxy wireguard:51821
+	# Caddy shares the node's network namespace (see docker-compose.prod-secure.yml),
+	# so the API is on loopback. Port must match server.port in config.yaml.
+	reverse_proxy 127.0.0.1:51821
 }
-

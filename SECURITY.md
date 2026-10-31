@@ -4,11 +4,12 @@ WGKeeper Node manages a WireGuard interface and its peers over an HTTP API, so i
 
 Examples of what we consider a vulnerability:
 
-- bypassing API key auth, the IP allowlist or the trusted proxy check;
+- bypassing API key auth;
 - reading or changing peers, keys or node config without a valid API key;
 - leaking private keys, preshared keys, the API key or the metrics token (in responses, logs or metrics);
 - injecting commands or rules through config values or API input (for example into iptables `PostUp`/`PostDown`);
-- crashing or exhausting the node with crafted requests despite rate and body limits;
+- crashing or exhausting the node with crafted requests despite the body limit;
+- a shipped deployment file (`docker-compose.*.yml`, `Caddyfile`) that exposes the plain HTTP API or the metrics endpoint beyond what it documents;
 - a vulnerable dependency or base image that is reachable in the shipped binary or container.
 
 ## Reporting a vulnerability
