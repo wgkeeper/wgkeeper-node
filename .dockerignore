@@ -3,8 +3,9 @@
 .github
 .gitignore
 
-# IDE
+# IDE / local tooling
 .idea
+.cache
 
 # CI / linting
 .golangci.yml
