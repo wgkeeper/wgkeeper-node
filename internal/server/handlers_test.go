@@ -754,3 +754,27 @@ func TestResultLabelDeviceSentinel(t *testing.T) {
 		t.Errorf("resultLabel = %q, want %q", got, metrics.ResultErrorDevice)
 	}
 }
+
+func TestCreatePeerDeviceUnavailable(t *testing.T) {
+	cases := map[string]struct {
+		err  error
+		code string
+	}{
+		"timeout": {fmt.Errorf("%w: %w", wireguard.ErrDevice, wireguard.ErrDeviceTimeout), "device_timeout"},
+		"busy":    {fmt.Errorf("%w: %w", wireguard.ErrDevice, wireguard.ErrDeviceBusy), "device_busy"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			router := newTestRouter()
+			router.POST(pathPeers, apiKeyMiddleware(testAPIKey), createPeerHandler(mockWGService{
+				ensurePeerFunc: func(string, *time.Time, []string) (wireguard.PeerInfo, error) {
+					return wireguard.PeerInfo{}, tc.err
+				},
+			}, nil))
+			body := []byte(`{"peerId":"550e8400-e29b-41d4-a716-446655440000"}`)
+			rec := performRequest(t, router, http.MethodPost, pathPeers, body, testAPIKey)
+			assertStatus(t, rec, http.StatusServiceUnavailable)
+			assertJSONErrorCode(t, rec.Body.Bytes(), tc.code)
+		})
+	}
+}

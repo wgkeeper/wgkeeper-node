@@ -1,7 +1,6 @@
 package wireguard
 
 import (
-	"context"
 	"errors"
 	"net"
 	"strings"
@@ -819,10 +818,12 @@ func TestDeviceCacheMissAfterTTL(t *testing.T) {
 	}
 }
 
-func TestDeviceCacheErrorNotCached(t *testing.T) {
+// TestDeviceCacheErrorCachedForTTL checks that a failed device read is reused
+// for the cache TTL, so callers queued behind a timed-out fetch don't each
+// wait for their own timeout, and that the next read after the TTL retries.
+func TestDeviceCacheErrorCachedForTTL(t *testing.T) {
 	sentinel := errors.New("transient error")
 	calls := 0
-	// First call fails, second call succeeds.
 	var client fakeWGClientFunc = func() (*wgtypes.Device, error) {
 		calls++
 		if calls == 1 {
@@ -830,20 +831,20 @@ func TestDeviceCacheErrorNotCached(t *testing.T) {
 		}
 		return &wgtypes.Device{ListenPort: 1234}, nil
 	}
-	svc := newSvcWithCache(client, time.Second)
+	svc := newSvcWithCache(client, 30*time.Millisecond)
 
-	if _, err := svc.cachedDevice(); !errors.Is(err, sentinel) {
-		t.Fatalf("expected sentinel on first call, got %v", err)
+	for range 3 {
+		if _, err := svc.cachedDevice(); !errors.Is(err, sentinel) {
+			t.Fatalf("expected the cached sentinel, got %v", err)
+		}
 	}
+	if calls != 1 {
+		t.Fatalf("expected 1 kernel call while the error is cached, got %d", calls)
+	}
+	time.Sleep(40 * time.Millisecond)
 	got, err := svc.cachedDevice()
-	if err != nil {
-		t.Fatalf("second call: unexpected error: %v", err)
-	}
-	if got.ListenPort != 1234 {
-		t.Fatalf("expected ListenPort 1234, got %d", got.ListenPort)
-	}
-	if calls != 2 {
-		t.Fatalf("expected 2 calls (error not cached), got %d", calls)
+	if err != nil || got.ListenPort != 1234 {
+		t.Fatalf("after TTL: got %v, %v; want a fresh read", got, err)
 	}
 }
 
@@ -873,8 +874,86 @@ func TestDeviceWithTimeoutExpires(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected timeout error, got nil")
 	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("expected DeadlineExceeded, got %v", err)
+	if !errors.Is(err, ErrDeviceTimeout) {
+		t.Fatalf("expected ErrDeviceTimeout, got %v", err)
+	}
+}
+
+// TestDeviceReadsStuckAreCapped checks that reads stuck in the kernel don't
+// pile up: past maxConcurrentDeviceReads, new reads fail fast as busy.
+func TestDeviceReadsStuckAreCapped(t *testing.T) {
+	bc := newBlockingClient()
+	defer close(bc.done)
+	svc := &WireGuardService{client: bc, deviceName: "wg0", deviceOpTimeout: 10 * time.Millisecond}
+	for range maxConcurrentDeviceReads {
+		if _, err := svc.deviceWithTimeout(); !errors.Is(err, ErrDeviceTimeout) {
+			t.Fatalf("expected timeout, got %v", err)
+		}
+	}
+	start := time.Now()
+	if _, err := svc.deviceWithTimeout(); !errors.Is(err, ErrDeviceBusy) {
+		t.Fatalf("expected ErrDeviceBusy once reads are stuck, got %v", err)
+	}
+	if time.Since(start) > 5*time.Millisecond {
+		t.Fatal("a busy read must fail fast, not wait for the timeout")
+	}
+}
+
+// blockingConfigureClient blocks ConfigureDevice until released.
+type blockingConfigureClient struct {
+	done   chan struct{}
+	device *wgtypes.Device
+}
+
+func (b blockingConfigureClient) Device(_ string) (*wgtypes.Device, error) { return b.device, nil }
+func (b blockingConfigureClient) ConfigureDevice(_ string, _ wgtypes.Config) error {
+	<-b.done
+	return nil
+}
+
+// TestCreatePeerTimeoutKeepsStoreAndReconciles checks the timeout path: the
+// peer is kept in the store (the kernel may still apply it), the caller gets
+// ErrDeviceTimeout, a second change fails fast as busy while the first call is
+// stuck, and the background reconcile puts the peer on the device afterwards.
+func TestCreatePeerTimeoutKeepsStoreAndReconciles(t *testing.T) {
+	bc := blockingConfigureClient{done: make(chan struct{}), device: &wgtypes.Device{}}
+	_, subnet4, _ := net.ParseCIDR(subnetTestCIDR)
+	svc := &WireGuardService{
+		client: bc, deviceName: "wg0", subnet4: subnet4, serverIP4: net.ParseIP(ipServerTest),
+		store: NewPeerStore(), deviceOpTimeout: 10 * time.Millisecond,
+		reconcileSignal: make(chan struct{}, 1),
+	}
+
+	if _, err := svc.EnsurePeer(peerIDNewPeer, nil, nil); !errors.Is(err, ErrDeviceTimeout) {
+		t.Fatalf("expected ErrDeviceTimeout, got %v", err)
+	}
+	if _, ok := svc.store.Get(peerIDNewPeer); !ok {
+		t.Fatal("peer must stay in the store after a timeout")
+	}
+	if !svc.needsReconcile.Load() {
+		t.Fatal("a timeout must schedule a reconcile")
+	}
+	select {
+	case <-svc.reconcileSignal:
+	default:
+		t.Fatal("a timeout must wake the background loop")
+	}
+
+	if _, err := svc.EnsurePeer("another-peer", nil, nil); !errors.Is(err, ErrDeviceBusy) {
+		t.Fatalf("expected ErrDeviceBusy while the first call is stuck, got %v", err)
+	}
+	if _, ok := svc.store.Get("another-peer"); ok {
+		t.Fatal("a busy device must not leave the peer in the store")
+	}
+
+	close(bc.done) // the kernel call returns
+	deadline := time.Now().Add(time.Second)
+	for svc.configuring.Load() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	svc.reconcileIfNeeded()
+	if svc.needsReconcile.Load() {
+		t.Fatal("reconcile should succeed once the device responds")
 	}
 }
 

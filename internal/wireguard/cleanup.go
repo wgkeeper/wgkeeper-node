@@ -11,8 +11,10 @@ import (
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 
-// RunExpiredPeersCleanup runs a loop that periodically removes peers whose ExpiresAt is in the past.
-// It exits when ctx is canceled. First run is immediate; then every interval.
+// RunExpiredPeersCleanup runs the background loop: every interval it removes
+// peers whose ExpiresAt is in the past and, after a timed-out device change,
+// reconciles the device with the store (also right away when signalled). It
+// exits when ctx is canceled. First run is immediate.
 func (s *WireGuardService) RunExpiredPeersCleanup(ctx context.Context, interval time.Duration) {
 	s.runCleanupSafe()
 	ticker := time.NewTicker(interval)
@@ -21,10 +23,23 @@ func (s *WireGuardService) RunExpiredPeersCleanup(ctx context.Context, interval 
 		select {
 		case <-ctx.Done():
 			return
+		case <-s.reconcileSignal:
+			s.runSafe(s.reconcileIfNeeded)
 		case <-ticker.C:
+			s.runSafe(s.reconcileIfNeeded)
 			s.runCleanupSafe()
 		}
 	}
+}
+
+// runSafe runs fn and recovers a panic so the background loop keeps running.
+func (s *WireGuardService) runSafe(fn func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("background task panic recovered", "panic", r, "stack", string(debug.Stack()))
+		}
+	}()
+	fn()
 }
 
 // runCleanupSafe runs cleanupExpiredPeers and recovers any panic so the cleanup goroutine keeps running.
@@ -112,7 +127,7 @@ func (s *WireGuardService) doCleanupBatch(candidates []string, now time.Time) ([
 	if err := s.store.PersistDeleteBatch(ids...); err != nil {
 		return nil, fmt.Errorf(errSavePeerStoreFmt, ErrPeerStore, err)
 	}
-	if err := s.configureDevice(wgtypes.Config{Peers: peers}); err != nil {
+	if err := s.configureDevice(wgtypes.Config{Peers: peers}); err != nil && !s.deviceChangeUncertain(err) {
 		var rbErr error
 		for _, rec := range toRemove {
 			rbErr = errors.Join(rbErr, s.store.PersistPut(rec))

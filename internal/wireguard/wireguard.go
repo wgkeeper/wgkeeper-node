@@ -1,7 +1,6 @@
 package wireguard
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -40,6 +39,13 @@ var (
 	ErrPeerStore = errors.New("save peer store")
 	// ErrDevice wraps failures to change the WireGuard device.
 	ErrDevice = errors.New("configure wireguard device")
+	// ErrDeviceTimeout means a device call did not return in time. The kernel
+	// may still apply it, so the change is kept in the peer store and the
+	// device is reconciled to the store in the background.
+	ErrDeviceTimeout = errors.New("wireguard device did not respond in time")
+	// ErrDeviceBusy means an earlier device call is still stuck in the kernel;
+	// no new call was made, so nothing changed.
+	ErrDeviceBusy = errors.New("an earlier wireguard device call has not returned yet")
 	// ErrPeerExpired is returned when rotating a peer whose expiry has passed
 	// without giving it a new one: the rotation would succeed and the cleanup
 	// loop would delete the peer moments later.
@@ -124,9 +130,18 @@ type WireGuardService struct {
 	// serverInfo caches the server public key and listen port after the first
 	// successful device read; see ServerInfo.
 	serverInfo atomic.Pointer[serverInfo]
-	// deviceOpTimeout overrides wgOpTimeout for device read operations.
-	// Zero means use wgOpTimeout. Exposed for tests only.
+	// deviceOpTimeout overrides wgOpTimeout for device calls. Zero means use
+	// wgOpTimeout. Exposed for tests only.
 	deviceOpTimeout time.Duration
+	// configuring is set while a ConfigureDevice call runs, including one that
+	// timed out and is still stuck in the kernel; reading counts device reads
+	// the same way. They stop a hung netlink from piling up goroutines.
+	configuring atomic.Bool
+	reading     atomic.Int32
+	// needsReconcile is set when a device change timed out; reconcileSignal
+	// wakes the background loop to bring the device back in line with the store.
+	needsReconcile  atomic.Bool
+	reconcileSignal chan struct{}
 }
 
 type wgClient interface {
@@ -229,15 +244,16 @@ func NewWireGuardService(cfg config.Config) (*WireGuardService, error) {
 		return nil, err
 	}
 	svc := &WireGuardService{
-		client:      client,
-		deviceName:  cfg.WGInterface,
-		subnet4:     subnet4,
-		serverIP4:   serverIP4,
-		subnet6:     subnet6,
-		serverIP6:   serverIP6,
-		store:       NewPeerStore(),
-		persistPath: cfg.PeerStoreFile,
-		devCache:    newDeviceCache(deviceCacheTTL),
+		client:          client,
+		deviceName:      cfg.WGInterface,
+		subnet4:         subnet4,
+		serverIP4:       serverIP4,
+		subnet6:         subnet6,
+		serverIP6:       serverIP6,
+		store:           NewPeerStore(),
+		persistPath:     cfg.PeerStoreFile,
+		devCache:        newDeviceCache(deviceCacheTTL),
+		reconcileSignal: make(chan struct{}, 1),
 	}
 	if err := initPersistStore(svc); err != nil {
 		return nil, errors.Join(err, svc.store.Close())
@@ -444,19 +460,68 @@ func (s *WireGuardService) notifyRollback(op string, rollbackErr error) {
 // the call continues in the background; the buffered channel ensures it
 // eventually exits without leaking.
 func (s *WireGuardService) configureDevice(cfg wgtypes.Config) error {
-	ctx, cancel := context.WithTimeout(context.Background(), wgOpTimeout)
-	defer cancel()
+	if !s.configuring.CompareAndSwap(false, true) {
+		return fmt.Errorf("%w: %w", ErrDevice, ErrDeviceBusy)
+	}
 	done := make(chan error, 1)
-	go func() { done <- s.client.ConfigureDevice(s.deviceName, cfg) }()
+	go func() {
+		defer s.configuring.Store(false)
+		done <- s.client.ConfigureDevice(s.deviceName, cfg)
+	}()
+	timer := time.NewTimer(s.opTimeout())
+	defer timer.Stop()
 	select {
 	case err := <-done:
 		if err != nil {
 			return fmt.Errorf("%w: %w", ErrDevice, err)
 		}
 		return nil
-	case <-ctx.Done():
-		return fmt.Errorf("%w: %w", ErrDevice, ctx.Err())
+	case <-timer.C:
+		return fmt.Errorf("%w: %w", ErrDevice, ErrDeviceTimeout)
 	}
+}
+
+func (s *WireGuardService) opTimeout() time.Duration {
+	if s.deviceOpTimeout > 0 {
+		return s.deviceOpTimeout
+	}
+	return wgOpTimeout
+}
+
+// deviceChangeUncertain reports whether err means the device may or may not
+// have applied the change (a timeout). Callers then keep the write-ahead
+// state in the store instead of rolling it back, and the device is
+// reconciled to the store in the background: rolling back would be wrong if
+// the kernel applies the change late, for example after a rotation the client
+// holding the old key would be locked out.
+func (s *WireGuardService) deviceChangeUncertain(err error) bool {
+	if !errors.Is(err, ErrDeviceTimeout) {
+		return false
+	}
+	s.needsReconcile.Store(true)
+	select {
+	case s.reconcileSignal <- struct{}{}:
+	default:
+	}
+	slog.Warn("wireguard device timed out; the peer store is kept and the device will be reconciled to it")
+	return true
+}
+
+// reconcileIfNeeded brings the device back in line with the store after a
+// timed-out change. It retries on the next call until it succeeds.
+func (s *WireGuardService) reconcileIfNeeded() {
+	if !s.needsReconcile.Load() {
+		return
+	}
+	s.mu.Lock()
+	err := s.reconcileStoreWithDevice()
+	s.mu.Unlock()
+	if err != nil {
+		slog.Warn("reconcile device with peer store failed; will retry", "error", err)
+		return
+	}
+	s.needsReconcile.Store(false)
+	slog.Info("device reconciled with peer store")
 }
 
 // deviceCacheTTL is how long a device snapshot is reused. Only handshake times
@@ -473,6 +538,8 @@ type deviceCache struct {
 	mu        sync.Mutex
 	snap      *deviceSnapshot
 	fetchedAt time.Time
+	err       error
+	errAt     time.Time
 	ttl       time.Duration
 }
 
@@ -512,10 +579,17 @@ func (c *deviceCache) get(fetch func() (*wgtypes.Device, error)) (*deviceSnapsho
 	if c.snap != nil && time.Since(c.fetchedAt) < c.ttl {
 		return c.snap, nil
 	}
+	// A recent failure is returned as is: callers queued behind a fetch that
+	// timed out must not each wait for their own timeout.
+	if c.err != nil && time.Since(c.errAt) < c.ttl {
+		return nil, c.err
+	}
 	dev, err := fetch()
 	if err != nil {
+		c.err, c.errAt = err, time.Now()
 		return nil, err
 	}
+	c.err = nil
 	c.snap = &deviceSnapshot{dev: dev}
 	c.fetchedAt = time.Now()
 	return c.snap, nil
@@ -527,28 +601,33 @@ func (c *deviceCache) get(fetch func() (*wgtypes.Device, error)) (*deviceSnapsho
 // when the timeout fires the goroutine continues in the background; the
 // buffered channel ensures it eventually exits without leaking.
 func (s *WireGuardService) deviceWithTimeout() (*wgtypes.Device, error) {
-	timeout := s.deviceOpTimeout
-	if timeout <= 0 {
-		timeout = wgOpTimeout
+	// A couple of concurrent reads are normal (the cache fetch and a
+	// background reconcile); more means earlier calls are stuck in the kernel.
+	if s.reading.Add(1) > maxConcurrentDeviceReads {
+		s.reading.Add(-1)
+		return nil, fmt.Errorf("read wireguard device: %w", ErrDeviceBusy)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
 	type result struct {
 		dev *wgtypes.Device
 		err error
 	}
 	done := make(chan result, 1)
 	go func() {
+		defer s.reading.Add(-1)
 		dev, err := s.client.Device(s.deviceName)
 		done <- result{dev, err}
 	}()
+	timer := time.NewTimer(s.opTimeout())
+	defer timer.Stop()
 	select {
 	case r := <-done:
 		return r.dev, r.err
-	case <-ctx.Done():
-		return nil, fmt.Errorf("read wireguard device: %w", ctx.Err())
+	case <-timer.C:
+		return nil, fmt.Errorf("read wireguard device: %w", ErrDeviceTimeout)
 	}
 }
+
+const maxConcurrentDeviceReads = 2
 
 // cachedDevice returns a recent snapshot of the WireGuard device, fetching a
 // fresh one from the kernel when the cache has expired. Falls back to a direct
@@ -685,6 +764,12 @@ func (s *WireGuardService) createPeer(peerID string, expiresAt *time.Time, addre
 		PersistentKeepaliveInterval: keepaliveInterval(),
 	}
 	if err := s.configureDevice(wgtypes.Config{Peers: []wgtypes.PeerConfig{peerConfig}}); err != nil {
+		if s.deviceChangeUncertain(err) {
+			// The peer stays in the store and reaches the device through
+			// reconcile. The caller got no keys; retrying rotates them.
+			s.store.Set(rec)
+			return PeerInfo{}, err
+		}
 		// Rollback persist (best-effort). On rollback failure the peer remains
 		// in bbolt as an orphan; startup reconcile will install it on the
 		// device next time and it becomes a normal (unused) peer the operator
@@ -774,6 +859,10 @@ func (s *WireGuardService) DeletePeer(peerID string) ([]string, error) {
 	}
 	remove := wgtypes.PeerConfig{PublicKey: record.PublicKey, Remove: true}
 	if err := s.configureDevice(wgtypes.Config{Peers: []wgtypes.PeerConfig{remove}}); err != nil {
+		if s.deviceChangeUncertain(err) {
+			s.forgetPeerLocked(record)
+			return nil, err
+		}
 		rbErr := s.store.PersistPut(record)
 		if rbErr != nil {
 			slog.Error("rollback persist after delete failure",
@@ -990,6 +1079,10 @@ func (s *WireGuardService) rotatePeer(peerID string, record PeerRecord, expiresA
 		},
 	}
 	if err := s.configureDevice(config); err != nil {
+		if s.deviceChangeUncertain(err) {
+			s.store.Set(newRec)
+			return PeerInfo{}, err
+		}
 		// Rollback persist to the old record. Best-effort: on rollback failure
 		// bbolt holds the new key while the device still has the old one.
 		// Startup reconcile will then install the new key — orphaning the old

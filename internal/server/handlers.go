@@ -342,6 +342,12 @@ func peerError(err error) (int, string, string) {
 	if errors.Is(err, wireguard.ErrNoAvailableIP) {
 		return http.StatusConflict, "no available ip addresses", "no_available_ip"
 	}
+	if errors.Is(err, wireguard.ErrDeviceTimeout) {
+		return http.StatusServiceUnavailable, "wireguard device did not respond; the change is kept and will reach the device when it recovers, retry the request", "device_timeout"
+	}
+	if errors.Is(err, wireguard.ErrDeviceBusy) {
+		return http.StatusServiceUnavailable, "wireguard device is busy; nothing was changed, retry the request", "device_busy"
+	}
 	if errors.Is(err, wireguard.ErrPeerExpired) {
 		return http.StatusConflict, "peer has expired; pass a future expiresAt to renew it", "peer_expired"
 	}

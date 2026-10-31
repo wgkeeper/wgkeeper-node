@@ -45,6 +45,8 @@ The node refuses to start if the config still contains a removed key (`server.tl
 
 ### Fixed
 
+- A WireGuard device call that times out is no longer treated as failed. The kernel can still apply it later, so rolling back the peer store could lock out a client whose key was rotated, or leave an unmanaged peer whose address was handed out again. The change now stays in the store, the API returns `503 device_timeout`, and a background reconcile brings the device in line with the store once it responds. Retrying the request is safe.
+- A hung netlink no longer piles up goroutines or queues every request behind it: while a device call is stuck, new changes fail fast with `503 device_busy` (nothing changed), at most two device reads run at once, and a failed device read is reused for the cache TTL instead of every waiting caller timing out in turn.
 - Creating a peer could fail with `409 no_available_ip` on subnets larger than a `/16` (IPv4) or `/112` (IPv6) while free addresses were left: the allocator gave up after 65,536 candidates. Peer addresses now come from a pool that hands out the lowest freed address first, then the next unused one, with no scan limit.
 - Expired peers are counted in `wgkeeper_peer_operations_total{op="expire"}`, and failed device changes in `result="error_device"` instead of `error_internal`.
 - **Breaking:** the node no longer deletes stored peers that fall outside the configured subnets. A subnet typo used to wipe every peer on the next restart; now startup fails with an error and nothing is deleted. Startup also fails when a stored peer holds the server address or shares an address with another peer.
