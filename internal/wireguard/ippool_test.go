@@ -2,6 +2,7 @@ package wireguard
 
 import (
 	"errors"
+	"net"
 	"net/netip"
 	"testing"
 )
@@ -140,5 +141,74 @@ func BenchmarkIPPoolAllocateAfterDelete(b *testing.B) {
 		if err != nil || got != a {
 			b.Fatalf("got %v, %v; want %v", got, err, a)
 		}
+	}
+}
+
+func TestResolveServerIP4(t *testing.T) {
+	_, subnet, _ := net.ParseCIDR(subnetTestCIDR)
+
+	ip, err := resolveServerIP4(subnet, "10.0.0.10")
+	if err != nil {
+		t.Fatalf(msgUnexpectedError, err)
+	}
+	if ip.String() != "10.0.0.10" {
+		t.Fatalf("unexpected ip: %s", ip.String())
+	}
+
+	if _, err := resolveServerIP4(subnet, "10.0.1.10"); err == nil {
+		t.Fatalf("expected error for IP outside subnet")
+	}
+}
+
+func TestResolveServerIP4EmptyServerIPBadSubnet(t *testing.T) {
+	_, subnet31, _ := net.ParseCIDR(testSubnet31)
+	_, err := resolveServerIP4(subnet31, "")
+	if err == nil {
+		t.Fatal("expected error when serverIP is empty and subnet is /31 (too small)")
+	}
+}
+
+func TestResolveServerIP4IPv6Input(t *testing.T) {
+	_, subnet, _ := net.ParseCIDR(subnetTestCIDR)
+	_, err := resolveServerIP4(subnet, ipv6TestAddr1)
+	if err == nil {
+		t.Fatal("expected error for IPv6 address passed as server_ip")
+	}
+}
+
+func TestResolveServerIP6(t *testing.T) {
+	_, subnet, _ := net.ParseCIDR(subnet6TestCIDR64)
+	ip, err := resolveServerIP6(subnet, ipv6TestAddr1)
+	if err != nil {
+		t.Fatalf("resolveServerIP6: %v", err)
+	}
+	if ip.String() != ipv6TestAddr1 {
+		t.Errorf("got %s", ip.String())
+	}
+
+	_, err = resolveServerIP6(subnet, "not-an-ip") // invalid
+	if err == nil {
+		t.Error("expected error for invalid IP")
+	}
+
+	_, err = resolveServerIP6(subnet, "10.0.0.1") // IPv4
+	if err == nil {
+		t.Error("expected error for IPv4")
+	}
+
+	_, err = resolveServerIP6(subnet, "fd01::1") // outside subnet
+	if err == nil {
+		t.Error("expected error for IP outside subnet")
+	}
+}
+
+func TestResolveServerIP6EmptyUsesFirst(t *testing.T) {
+	_, subnet, _ := net.ParseCIDR(subnet6TestCIDR)
+	ip, err := resolveServerIP6(subnet, "")
+	if err != nil {
+		t.Fatalf("resolveServerIP6: %v", err)
+	}
+	if ip == nil {
+		t.Fatal("expected non-nil IP")
 	}
 }

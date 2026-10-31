@@ -2,6 +2,7 @@ package wireguard
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -416,8 +417,6 @@ func TestLoadFromFileDuplicatePublicKey(t *testing.T) {
 	}
 }
 
-// ---------- ListPaginated ----------
-
 func TestListPaginatedOffsetBeyondTotal(t *testing.T) {
 	store := NewPeerStore()
 	makeStorePeers(t, store, 3)
@@ -453,8 +452,6 @@ func TestListPaginatedLimitZeroReturnsAll(t *testing.T) {
 		t.Fatalf("expected 5 records for limit=0, got %d", len(records))
 	}
 }
-
-// ---------- sorted index ----------
 
 // TestPeerStoreSetUpdatesCreatedAt covers the branch in Set where an existing
 // peer is updated with a different CreatedAt, triggering removeSortedKey + insertSorted.
@@ -624,8 +621,6 @@ func TestLoadFromFileRebuildsSortedIndex(t *testing.T) {
 	}
 }
 
-// ---------- readPeersFromBucket ----------
-
 // openTestBucket opens a fresh bbolt DB in a temp dir and calls fn with a
 // writable bucket, then returns a read-only view of the same bucket for the
 // caller to pass to readPeersFromBucket.
@@ -755,5 +750,70 @@ func TestPersistPutNoopOnInMemoryStore(t *testing.T) {
 	}
 	if err := store.PersistDeleteBatch("no-db"); err != nil {
 		t.Fatalf("PersistDeleteBatch: %v", err)
+	}
+}
+
+func TestStoreOpenFileCreatesFile(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/peers.db"
+	store := NewPeerStore()
+	if err := store.OpenFile(path); err != nil {
+		t.Fatalf("OpenFile: %v", err)
+	}
+	defer store.Close()
+	if _, err := os.Stat(path); err != nil {
+		t.Errorf("file should exist after OpenFile: %v", err)
+	}
+}
+
+func TestPersistPutNoopWhenNoDB(t *testing.T) {
+	store := NewPeerStore()
+	key, _ := wgtypes.GenerateKey()
+	psk, _ := wgtypes.GenerateKey()
+	rec := PeerRecord{
+		PeerID:       peerIDTest,
+		PublicKey:    key,
+		PresharedKey: psk,
+		AllowedIPs:   []net.IPNet{ipNet(t, ipPeerTest)},
+		CreatedAt:    time.Now().UTC(),
+	}
+	if err := store.PersistPut(rec); err != nil {
+		t.Fatalf("PersistPut with no DB open: expected nil, got %v", err)
+	}
+	if err := store.PersistDeleteBatch(peerIDTest); err != nil {
+		t.Fatalf("PersistDeleteBatch with no DB open: expected nil, got %v", err)
+	}
+}
+
+func TestPersistAfterCloseFails(t *testing.T) {
+	svc, record, _ := newPersistedTestService(t, nil)
+	if err := svc.store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := svc.store.PersistPut(record); !errors.Is(err, ErrStoreClosed) {
+		t.Errorf("PersistPut after Close: got %v, want ErrStoreClosed", err)
+	}
+	if err := svc.store.PersistDeleteBatch(record.PeerID); !errors.Is(err, ErrStoreClosed) {
+		t.Errorf("PersistDeleteBatch after Close: got %v, want ErrStoreClosed", err)
+	}
+}
+
+func TestPeerStoreDeleteBatch(t *testing.T) {
+	store := NewPeerStore()
+	base := time.Now().UTC()
+	for i := range 5 {
+		store.Set(PeerRecord{PeerID: fmt.Sprintf("p%d", i), CreatedAt: base.Add(time.Duration(i))})
+	}
+	store.DeleteBatch("p1", "p3", "missing")
+	recs, total := store.ListPaginated(0, 10)
+	if total != 3 {
+		t.Fatalf("total = %d, want 3", total)
+	}
+	var ids []string
+	for _, r := range recs {
+		ids = append(ids, r.PeerID)
+	}
+	if strings.Join(ids, ",") != "p0,p2,p4" {
+		t.Fatalf("remaining = %v, want p0,p2,p4 in order", ids)
 	}
 }

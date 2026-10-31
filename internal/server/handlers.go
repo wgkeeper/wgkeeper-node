@@ -111,13 +111,13 @@ func createPeerHandler(wgService wgPeerService, m *metrics.Metrics) gin.HandlerF
 		observeOp(m, op, start, err)
 		if err != nil {
 			status, message, reason := peerError(err)
-			writeError(c, status, message, reason, err, "peerId", req.PeerID)
+			writeError(c, status, message, reason, err, "peer_id", req.PeerID)
 			return
 		}
 
 		serverPublicKey, serverListenPort, err := wgService.ServerInfo()
 		if err != nil {
-			writeError(c, http.StatusInternalServerError, "server public key unavailable", "server_info_unavailable", err, "peerId", req.PeerID)
+			writeError(c, http.StatusInternalServerError, "server public key unavailable", "server_info_unavailable", err, "peer_id", req.PeerID)
 			return
 		}
 
@@ -126,11 +126,11 @@ func createPeerHandler(wgService wgPeerService, m *metrics.Metrics) gin.HandlerF
 			event = "audit.peer_rotated"
 		}
 		slog.Info(event,
-			"peerId", req.PeerID,
-			"publicKey", info.PublicKey,
-			"allowedIPs", info.AllowedIPs,
-			"addressFamilies", info.AddressFamilies,
-			"expiresAt", formatExpiresAtForLog(expiresAt),
+			"peer_id", req.PeerID,
+			"public_key", info.PublicKey,
+			"allowed_ips", info.AllowedIPs,
+			"address_families", info.AddressFamilies,
+			"expires_at", formatExpiresAtForLog(expiresAt),
 			"client_ip", c.ClientIP(),
 			"forwarded_for", forwardedFor(c.Request),
 			"request_id", GetRequestIDFromContext(c.Request.Context()),
@@ -168,13 +168,13 @@ func deletePeerHandler(wgService wgPeerService, m *metrics.Metrics) gin.HandlerF
 		observeOp(m, metrics.OpDelete, start, err)
 		if err != nil {
 			status, message, reason := peerError(err)
-			writeError(c, status, message, reason, err, "peerId", peerID)
+			writeError(c, status, message, reason, err, "peer_id", peerID)
 			return
 		}
 
 		slog.Info("audit.peer_deleted",
-			"peerId", peerID,
-			"allowedIPs", allowedIPs,
+			"peer_id", peerID,
+			"allowed_ips", allowedIPs,
 			"client_ip", c.ClientIP(),
 			"forwarded_for", forwardedFor(c.Request),
 			"request_id", GetRequestIDFromContext(c.Request.Context()),

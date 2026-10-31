@@ -77,9 +77,9 @@ func (s *WireGuardService) cleanupExpiredPeers() {
 	}
 	for _, d := range deleted {
 		slog.Info("audit.peer_expired",
-			"peerId", d.peerID,
-			"publicKey", d.publicKey,
-			"allowedIPs", d.allowedIPs,
+			"peer_id", d.peerID,
+			"public_key", d.publicKey,
+			"allowed_ips", d.allowedIPs,
 		)
 	}
 }

@@ -3,6 +3,7 @@ package wireguard
 import (
 	"container/heap"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 )
@@ -167,4 +168,43 @@ func prefixFromIPNet(n *net.IPNet) (netip.Prefix, error) {
 func hostIPNet(a netip.Addr) net.IPNet {
 	bits := a.BitLen()
 	return net.IPNet{IP: net.IP(a.AsSlice()), Mask: net.CIDRMask(bits, bits)}
+}
+
+func resolveServerIP4(subnet *net.IPNet, serverIP string) (net.IP, error) {
+	return resolveServerIP(subnet, serverIP, "wireguard.server_ip", "wireguard.subnet", true)
+}
+
+func resolveServerIP6(subnet *net.IPNet, serverIP string) (net.IP, error) {
+	return resolveServerIP(subnet, serverIP, "wireguard.server_ip6", "wireguard.subnet6", false)
+}
+
+// resolveServerIP returns the configured server address, or the first host of
+// the subnet when none is configured.
+func resolveServerIP(subnet *net.IPNet, serverIP, ipField, subnetField string, want4 bool) (net.IP, error) {
+	prefix, err := prefixFromIPNet(subnet)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", subnetField, err)
+	}
+	if prefix.Addr().Is4() != want4 {
+		return nil, fmt.Errorf("%s has the wrong address family", subnetField)
+	}
+	first, _, err := hostRange(prefix)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", subnetField, err)
+	}
+	if serverIP == "" {
+		return net.IP(first.AsSlice()), nil
+	}
+	a, err := netip.ParseAddr(serverIP)
+	if err != nil || a.Is4() != want4 || a.Is4In6() {
+		family := "IPv6"
+		if want4 {
+			family = "IPv4"
+		}
+		return nil, fmt.Errorf("%s must be a valid %s address", ipField, family)
+	}
+	if !prefix.Contains(a) {
+		return nil, fmt.Errorf("%s must be inside %s", ipField, subnetField)
+	}
+	return net.IP(a.AsSlice()), nil
 }

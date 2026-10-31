@@ -23,6 +23,7 @@ The node refuses to start if the config still contains a removed key (`server.tl
 
 ### Changed
 
+- **Breaking (logs):** all log keys are snake_case. Audit and error lines use `peer_id`, `public_key`, `allowed_ips`, `address_families` and `expires_at` instead of `peerId`, `publicKey`, `allowedIPs`, `addressFamilies` and `expiresAt`; update log queries and alerts that match on them. The JSON API is unchanged.
 - **Breaking:** unknown keys in `config.yaml` stop the node with an error naming the key, instead of being ignored.
 - **Breaking:** `POST /peers` rejects unknown JSON fields and trailing data with `400 invalid_json`. A misspelled `expiresAt` used to create a permanent peer.
 - `server.port`, `wireguard.interface` and `wireguard.listen_port` default to `51821`, `wg0` and `51820`; the smallest config is `auth.api_key` plus a subnet. `wireguard.interface` must be a valid Linux interface name of up to 15 characters.
