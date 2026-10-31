@@ -75,8 +75,27 @@ func TestGinMiddlewareLabelsUnmatchedPath(t *testing.T) {
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/no/such/route", nil))
 
-	if got := testutil.ToFloat64(m.HTTPRequests.WithLabelValues("GET", pathUnmatched, "4xx")); got != 1 {
+	if got := testutil.ToFloat64(m.HTTPRequests.WithLabelValues("other", pathUnmatched, "4xx")); got != 1 {
 		t.Errorf("expected unmatched path counted under %q, got %v", pathUnmatched, got)
+	}
+}
+
+// TestGinMiddlewareBoundsMethodLabel checks that arbitrary request methods
+// can't create new series: the method is client input on unmatched routes.
+func TestGinMiddlewareBoundsMethodLabel(t *testing.T) {
+	m := New()
+	r := newRouter(m)
+	for _, method := range []string{"FOO1", "BAR2", strings.Repeat("X", 500)} {
+		r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(method, "/no/such/route", nil))
+	}
+	if got := testutil.CollectAndCount(m.HTTPRequests); got != 1 {
+		t.Errorf("expected one series for all unknown methods, got %d", got)
+	}
+	if got := methodLabel("PATCH", "/peers"); got != "other" {
+		t.Errorf("methodLabel(PATCH) = %q, want other", got)
+	}
+	if got := methodLabel(http.MethodPost, "/peers"); got != http.MethodPost {
+		t.Errorf("methodLabel(POST) = %q, want POST", got)
 	}
 }
 

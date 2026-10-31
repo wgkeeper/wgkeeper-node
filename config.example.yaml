@@ -1,6 +1,8 @@
+# Only auth.api_key and a subnet are required; everything else has a default.
+# Unknown keys are errors.
 server:
-  # Plain HTTP. For HTTPS and client IP filtering put a reverse proxy in front
-  # (see docker-compose.prod-secure.yml and Caddyfile).
+  # Plain HTTP, default 51821. For HTTPS and client IP filtering put a reverse
+  # proxy in front (see docker-compose.prod-secure.yml and Caddyfile).
   port: 51821
 auth:
   # At least 32 characters. Generate with: openssl rand -hex 32

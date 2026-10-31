@@ -217,9 +217,11 @@ func newHTTPServer(cfg config.Config, addr string, wgService *wireguard.WireGuar
 		Addr:              addr,
 		Handler:           server.NewRouter(cfg.APIKey, wgService, m),
 		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       120 * time.Second,
+		// The API needs a few short headers; Go's default allows 1 MB.
+		MaxHeaderBytes: 16 << 10,
+		ReadTimeout:    30 * time.Second,
+		WriteTimeout:   30 * time.Second,
+		IdleTimeout:    120 * time.Second,
 	}
 }
 

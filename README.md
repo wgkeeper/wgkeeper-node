@@ -112,13 +112,22 @@ NODE_CONFIG=/etc/wgkeeper/config.yaml
 
 `DEBUG=true` (or `1`) turns on debug-level logs. API responses are the same either way: internal error details are only ever written to the log, next to the request's `X-Request-Id`.
 
-See [`config.example.yaml`](config.example.yaml) for a commented example.
+See [`config.example.yaml`](config.example.yaml) for a commented example. Everything except the API key and a subnet has a default, so the smallest working config is:
+
+```yaml
+auth:
+  api_key: "<at least 32 characters>"
+wireguard:
+  subnet: "10.0.0.0/24"
+```
+
+Unknown keys are errors, so a misspelled key stops the node instead of silently being ignored.
 
 ### Server
 
 | Setting | Description |
 |---------|-------------|
-| `server.port` | API port. The API is plain HTTP; see [Deployment](#deployment) for HTTPS |
+| `server.port` | API port, default `51821`. The API is plain HTTP; see [Deployment](#deployment) for HTTPS |
 | `auth.api_key` | API key for all protected endpoints, at least 32 characters |
 
 The node has no TLS, IP allowlist or rate limit settings. Put those in the reverse proxy in front of it, where they are easier to configure and to change. `server.tls_cert`, `server.tls_key`, `server.allowed_ips` and `server.trusted_proxies` were removed in 1.4.0; the node refuses to start if the config still has them, so a setup that relied on them is never silently left unprotected.
@@ -127,8 +136,8 @@ The node has no TLS, IP allowlist or rate limit settings. Put those in the rever
 
 | Setting | Description |
 |---------|-------------|
-| `wireguard.interface` | Interface name, for example `wg0` |
-| `wireguard.listen_port` | WireGuard UDP port |
+| `wireguard.interface` | Interface name, default `wg0`. Up to 15 letters, digits, `-`, `_` and `.` |
+| `wireguard.listen_port` | WireGuard UDP port, default `51820` |
 | `wireguard.subnet` | IPv4 CIDR for peer addresses, prefix up to `/30`. At least one of `subnet` and `subnet6` is required |
 | `wireguard.server_ip` | Optional IPv4 address of the server inside `subnet` |
 | `wireguard.subnet6` | IPv6 CIDR for peer addresses, prefix up to `/126` |
@@ -251,7 +260,9 @@ Creates a peer. If a peer with this `peerId` exists, its keys are rotated and it
 |-------|----------|-------------|
 | `peerId` | yes | UUID v4 chosen by the orchestrator |
 | `expiresAt` | no | RFC 3339 time after which the node removes the peer. Omit for a permanent peer; when rotating, omit to keep the current expiry |
-| `addressFamilies` | no | `["IPv4"]`, `["IPv6"]` or `["IPv4", "IPv6"]`. Omit to get every family the node has a subnet for |
+| `addressFamilies` | no | `["IPv4"]`, `["IPv6"]` or `["IPv4", "IPv6"]`. Omit to get every family the node has a subnet for. Unknown or repeated values return `400 invalid_address_family`; a family the node has no subnet for returns `400 unsupported_address_family` |
+
+Unknown fields and anything after the JSON object return `400 invalid_json`, so a misspelled field such as `expires_at` can't silently create a permanent peer.
 
 The response has `server` (`publicKey`, `listenPort`) and `peer` (`peerId`, `publicKey`, `privateKey`, `presharedKey`, `allowedIPs`, `addressFamilies`). The node does not store the private key, so this is the only time it is returned.
 
@@ -314,7 +325,7 @@ Both fields are required. The token must be at least 32 characters and must diff
 | `wgkeeper_http_request_duration_seconds` | histogram | `method`, `path` | Latency per endpoint |
 | `process_*`, `go_*` | | | Standard process and Go runtime metrics |
 
-The `path` label is the route template, such as `/peers/:peerId`, so peer IDs don't create new series. Requests to unknown routes are counted as `path="unmatched"`.
+The `path` label is the route template, such as `/peers/:peerId`, so peer IDs don't create new series. Requests to unknown routes are counted as `path="unmatched"`, and methods other than `GET`, `POST`, `DELETE`, `HEAD` and `OPTIONS` as `method="other"`.
 
 Ready-made configs are in [`examples/`](examples): a Prometheus [scrape config](examples/prometheus/prometheus.yml), [alerting rules](examples/prometheus/alerts.yml) for a down node, a failed store rollback, a full subnet and error bursts, and a [Grafana dashboard](examples/grafana/dashboard.json).
 

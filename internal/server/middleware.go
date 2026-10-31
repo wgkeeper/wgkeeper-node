@@ -1,6 +1,7 @@
 package server
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 	"net/http"
 
@@ -29,8 +30,9 @@ func apiKeyMiddleware(apiKey string) gin.HandlerFunc {
 }
 
 func apiKeyMatches(c *gin.Context, apiKey string) bool {
-	got := c.GetHeader(apiKeyHeader)
-	// No early exit on length: any branch before ConstantTimeCompare leaks
-	// the key length via response timing, reducing the attacker's search space.
-	return subtle.ConstantTimeCompare([]byte(got), []byte(apiKey)) == 1
+	// Compare SHA-256 digests: ConstantTimeCompare returns early when the
+	// lengths differ, which would leak the key length through timing.
+	got := sha256.Sum256([]byte(c.GetHeader(apiKeyHeader)))
+	want := sha256.Sum256([]byte(apiKey))
+	return subtle.ConstantTimeCompare(got[:], want[:]) == 1
 }

@@ -107,7 +107,7 @@ func (s *WireGuardService) doCleanupBatch(candidates []string, now time.Time) ([
 		peers[i] = wgtypes.PeerConfig{PublicKey: rec.PublicKey, Remove: true}
 	}
 	if err := s.store.PersistDeleteBatch(ids...); err != nil {
-		return nil, fmt.Errorf(errSavePeerStoreFmt, err)
+		return nil, fmt.Errorf(errSavePeerStoreFmt, ErrPeerStore, err)
 	}
 	if err := s.configureDevice(wgtypes.Config{Peers: peers}); err != nil {
 		var rbErr error

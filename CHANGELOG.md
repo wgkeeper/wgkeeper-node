@@ -23,6 +23,10 @@ The node refuses to start if the config still contains a removed key (`server.tl
 
 ### Changed
 
+- **Breaking:** unknown keys in `config.yaml` stop the node with an error naming the key, instead of being ignored.
+- **Breaking:** `POST /peers` rejects unknown JSON fields and trailing data with `400 invalid_json`. A misspelled `expiresAt` used to create a permanent peer.
+- `server.port`, `wireguard.interface` and `wireguard.listen_port` default to `51821`, `wg0` and `51820`; the smallest config is `auth.api_key` plus a subnet. `wireguard.interface` must be a valid Linux interface name of up to 15 characters.
+- Invalid `addressFamilies` (unknown or repeated values) return `400 invalid_address_family` instead of `500`.
 - **Breaking:** peers are isolated. The generated `wg0.conf` now drops peer traffic to other peers, to interfaces other than the WAN one, to the node itself (API, metrics, host services; ping still works), to cloud metadata addresses, and to private networks. Before, any peer could reach the node's API and metrics port directly, cloud metadata at `169.254.169.254`, the Docker host and other containers. Set `wireguard.routing.allow_private_networks: true` if peers need private networks such as an office LAN.
 - **Breaking:** the compose files no longer grant `SYS_MODULE` and add `no-new-privileges`. On kernels older than 5.6, run `modprobe wireguard` on the host.
 - The node logs `X-Forwarded-For` as `forwarded_for` next to the TCP peer address, so the client address is visible behind any proxy without proxy trust settings. README documents what any reverse proxy must do, with an nginx example in `examples/nginx/nginx.conf`; Caddy in `docker-compose.prod-secure.yml` is just the ready-made option.
@@ -49,6 +53,13 @@ The node refuses to start if the config still contains a removed key (`server.tl
 
 ### Security
 
+- Config parse errors no longer print the surrounding YAML lines, which could include `auth.api_key` or `metrics.token`.
+- The `method` label of `wgkeeper_http_requests_total` and `wgkeeper_http_request_duration_seconds` is limited to `GET`, `POST`, `DELETE`, `HEAD`, `OPTIONS` and `other`. Requests with arbitrary methods could create unbounded series and exhaust memory.
+- `/metrics` checks the bearer token before its rate limit, so unauthenticated requests can't lock out Prometheus; rejected attempts are logged at most once a second.
+- The API key and metrics token are compared as SHA-256 digests, so response timing no longer reveals their length.
+- The request body of `/peers` is read only after authentication, and both servers accept at most 16 KB of headers.
+- A handler panic is logged through slog without request headers; gin's default recovery printed `X-API-Key` in debug mode.
+- `metrics.token` is compared to the trimmed `auth.api_key`, so whitespace can't make the two secrets look different.
 - Release images ship with a signed build provenance attestation and an SBOM (see [SECURITY.md](SECURITY.md#verifying-images)).
 
 ## Earlier releases

@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"net/http"
 	"strconv"
 	"time"
 
@@ -42,7 +43,7 @@ func (m *Metrics) GinMiddleware() gin.HandlerFunc {
 		if path == "" {
 			path = pathUnmatched
 		}
-		method := c.Request.Method
+		method := methodLabel(c.Request.Method, path)
 		statusClass := classifyStatus(c.Writer.Status())
 
 		m.HTTPRequests.WithLabelValues(method, path, statusClass).Inc()
@@ -67,4 +68,18 @@ func classifyStatus(code int) string {
 	// Cardinality stays bounded: gin will only emit values from the standard
 	// HTTP set, so this branch fires effectively never in production.
 	return "unknown_" + strconv.Itoa(code)
+}
+
+// methodLabel bounds the method label. The request method is client input:
+// unmatched routes accept any token, and each distinct value would be a new
+// series kept forever.
+func methodLabel(method, path string) string {
+	if path == pathUnmatched {
+		return "other"
+	}
+	switch method {
+	case http.MethodGet, http.MethodPost, http.MethodDelete, http.MethodHead, http.MethodOptions:
+		return method
+	}
+	return "other"
 }

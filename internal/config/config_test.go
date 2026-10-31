@@ -258,21 +258,82 @@ wireguard:
 	}
 }
 
-func TestLoadConfigMissingInterface(t *testing.T) {
+// TestLoadConfigMinimal checks that a config with only the API key and a
+// subnet starts with the default ports, interface and peer store.
+func TestLoadConfigMinimal(t *testing.T) {
 	path := writeConfigFile(t, `
-server:
-  port: "51821"
 auth:
   api_key: "test-api-key-secure-key-longer!!"
 wireguard:
-  interface: ""
   subnet: "10.0.0.0/24"
-  listen_port: 51820
 `)
 	t.Setenv("NODE_CONFIG", path)
 
-	if _, err := LoadConfig(); err == nil {
-		t.Fatalf("expected error for missing interface")
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf(msgExpectedNoError, err)
+	}
+	if cfg.Port != DefaultAPIPort || cfg.WGInterface != DefaultInterface || cfg.WGListenPort != DefaultWireGuardPort {
+		t.Fatalf("defaults not applied: port=%d iface=%q listen=%d", cfg.Port, cfg.WGInterface, cfg.WGListenPort)
+	}
+	if cfg.PeerStoreFile != DefaultPeerStoreFile {
+		t.Fatalf("expected default peer store, got %q", cfg.PeerStoreFile)
+	}
+}
+
+func TestLoadConfigInvalidInterfaceName(t *testing.T) {
+	for _, name := range []string{"../../etc/x", "wg0;reboot", "a-very-long-interface-name"} {
+		t.Run(name, func(t *testing.T) {
+			path := writeConfigFile(t, `
+auth:
+  api_key: "test-api-key-secure-key-longer!!"
+wireguard:
+  interface: "`+name+`"
+  subnet: "10.0.0.0/24"
+`)
+			t.Setenv("NODE_CONFIG", path)
+			if _, err := LoadConfig(); err == nil {
+				t.Fatalf("expected error for interface %q", name)
+			}
+		})
+	}
+}
+
+// TestLoadConfigUnknownKeyRejected guards against typos silently dropping a
+// setting, e.g. a misspelled allow_private_networks.
+func TestLoadConfigUnknownKeyRejected(t *testing.T) {
+	path := writeConfigFile(t, `
+auth:
+  api_key: "test-api-key-secure-key-longer!!"
+wireguard:
+  subnet: "10.0.0.0/24"
+  routing:
+    alow_private_networks: true
+`)
+	t.Setenv("NODE_CONFIG", path)
+	_, err := LoadConfig()
+	if err == nil || !strings.Contains(err.Error(), "alow_private_networks") {
+		t.Fatalf("expected an unknown-field error naming the key, got %v", err)
+	}
+}
+
+// TestLoadConfigParseErrorHidesSecrets checks that a YAML error doesn't echo
+// the surrounding source lines, which would print the API key into the log.
+func TestLoadConfigParseErrorHidesSecrets(t *testing.T) {
+	path := writeConfigFile(t, `
+auth:
+  api_key: "super-secret-api-key-value-0123456789"
+wireguard:
+  subnet: "10.0.0.0/24"
+  listen_port: not-a-number
+`)
+	t.Setenv("NODE_CONFIG", path)
+	_, err := LoadConfig()
+	if err == nil {
+		t.Fatal("expected a parse error")
+	}
+	if strings.Contains(err.Error(), "super-secret") {
+		t.Fatalf("parse error leaks the config source: %v", err)
 	}
 }
 
@@ -516,20 +577,20 @@ func TestOptionalIPv6WithIPv4Address(t *testing.T) {
 }
 
 func TestParsePortZero(t *testing.T) {
-	if _, err := parsePort("field", "0"); err == nil {
+	if _, err := parseAPIPort("0"); err == nil {
 		t.Fatal("expected error for port 0")
 	}
 }
 
 func TestParsePortMaxValid(t *testing.T) {
-	port, err := parsePort("field", "65535")
+	port, err := parseAPIPort("65535")
 	if err != nil || port != 65535 {
 		t.Fatalf("expected port 65535, got %d, err: %v", port, err)
 	}
 }
 
 func TestParsePortTooHigh(t *testing.T) {
-	if _, err := parsePort("field", "65536"); err == nil {
+	if _, err := parseAPIPort("65536"); err == nil {
 		t.Fatal("expected error for port 65536")
 	}
 }
@@ -725,4 +786,18 @@ func itoa(n int) string {
 		buf[i] = '-'
 	}
 	return string(buf[i:])
+}
+
+// TestConfigExampleLoads keeps config.example.yaml valid under strict key
+// checking once its placeholder API key is replaced.
+func TestConfigExampleLoads(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "config.example.yaml"))
+	if err != nil {
+		t.Fatalf("read example: %v", err)
+	}
+	content := strings.Replace(string(raw), "REPLACE_WITH_32+_RANDOM_CHARS", testAPIKey, 1)
+	t.Setenv("NODE_CONFIG", writeConfigFile(t, content))
+	if _, err := LoadConfig(); err != nil {
+		t.Fatalf("config.example.yaml does not load: %v", err)
+	}
 }

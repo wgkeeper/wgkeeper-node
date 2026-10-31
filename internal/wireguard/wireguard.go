@@ -24,13 +24,19 @@ const (
 	FamilyIPv4 = "IPv4"
 	FamilyIPv6 = "IPv6"
 
-	errSavePeerStoreFmt = "save peer store: %w"
+	errSavePeerStoreFmt = "%w: %w" // ErrPeerStore, cause
 )
 
 var (
 	ErrPeerNotFound             = errors.New("peer not found")
 	ErrNoAvailableIP            = errors.New("no available ip addresses")
 	ErrUnsupportedAddressFamily = errors.New("requested address family is not supported by this node")
+	// ErrInvalidAddressFamily marks a malformed addressFamilies list: an
+	// unknown value or a duplicate. It is a client error, unlike
+	// ErrUnsupportedAddressFamily's valid-but-unavailable family.
+	ErrInvalidAddressFamily = errors.New("invalid address family")
+	// ErrPeerStore wraps failures to write the bbolt peer store.
+	ErrPeerStore = errors.New("save peer store")
 	// ErrPeerExpired is returned when rotating a peer whose expiry has passed
 	// without giving it a new one: the rotation would succeed and the cleanup
 	// loop would delete the peer moments later.
@@ -543,10 +549,10 @@ func (s *WireGuardService) ValidateAddressFamilies(requested []string) ([]string
 	var out []string
 	for _, f := range requested {
 		if f != FamilyIPv4 && f != FamilyIPv6 {
-			return nil, fmt.Errorf("addressFamilies may only contain %q and %q", FamilyIPv4, FamilyIPv6)
+			return nil, fmt.Errorf("%w: addressFamilies may only contain %q and %q", ErrInvalidAddressFamily, FamilyIPv4, FamilyIPv6)
 		}
 		if seen[f] {
-			return nil, fmt.Errorf("duplicate address family %q", f)
+			return nil, fmt.Errorf("%w: duplicate %q", ErrInvalidAddressFamily, f)
 		}
 		seen[f] = true
 		if !slices.Contains(nodeFamilies, f) {
@@ -621,7 +627,7 @@ func (s *WireGuardService) createPeer(peerID string, expiresAt *time.Time, addre
 	// nothing has changed yet — return the error and free the reserved IP.
 	if err := s.store.PersistPut(rec); err != nil {
 		s.releaseAllocatedIPs(allowedIPs)
-		return PeerInfo{}, fmt.Errorf(errSavePeerStoreFmt, err)
+		return PeerInfo{}, fmt.Errorf(errSavePeerStoreFmt, ErrPeerStore, err)
 	}
 
 	peerConfig := wgtypes.PeerConfig{
@@ -694,7 +700,7 @@ func (s *WireGuardService) DeletePeer(peerID string) ([]string, error) {
 		return nil, ErrPeerNotFound
 	}
 	if err := s.store.PersistDeleteBatch(peerID); err != nil {
-		return nil, fmt.Errorf(errSavePeerStoreFmt, err)
+		return nil, fmt.Errorf(errSavePeerStoreFmt, ErrPeerStore, err)
 	}
 	remove := wgtypes.PeerConfig{PublicKey: record.PublicKey, Remove: true}
 	if err := s.configureDevice(wgtypes.Config{Peers: []wgtypes.PeerConfig{remove}}); err != nil {
@@ -932,7 +938,7 @@ func (s *WireGuardService) rotatePeer(peerID string, record PeerRecord, expiresA
 	// Write-ahead persist: replace the bbolt record with the new keys before
 	// touching the device. If this fails, nothing has changed.
 	if err := s.store.PersistPut(newRec); err != nil {
-		return PeerInfo{}, fmt.Errorf(errSavePeerStoreFmt, err)
+		return PeerInfo{}, fmt.Errorf(errSavePeerStoreFmt, ErrPeerStore, err)
 	}
 
 	config := wgtypes.Config{

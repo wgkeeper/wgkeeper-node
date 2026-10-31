@@ -1,12 +1,13 @@
 package server
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/wgkeeper/wgkeeper-node/internal/metrics"
@@ -22,7 +23,7 @@ const (
 )
 
 type peerRequest struct {
-	PeerID          string   `json:"peerId" binding:"required"`
+	PeerID          string   `json:"peerId"`
 	ExpiresAt       *string  `json:"expiresAt,omitempty"`       // RFC3339; omit = permanent peer
 	AddressFamilies []string `json:"addressFamilies,omitempty"` // optional: ["IPv4"], ["IPv6"], or ["IPv4","IPv6"]; omit = all node supports
 }
@@ -80,7 +81,12 @@ func statsHandler(wgService statsProvider) gin.HandlerFunc {
 func createPeerHandler(wgService wgPeerService, m *metrics.Metrics) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var req peerRequest
-		if err := c.ShouldBindJSON(&req); err != nil {
+		if err := decodeStrictJSON(c.Request.Body, &req); err != nil {
+			var tooLarge *http.MaxBytesError
+			if errors.As(err, &tooLarge) {
+				writeError(c, http.StatusRequestEntityTooLarge, "request body too large", "body_too_large", nil)
+				return
+			}
 			writeError(c, http.StatusBadRequest, "invalid json body", "invalid_json", err)
 			return
 		}
@@ -304,11 +310,9 @@ func resultLabel(err error) string {
 		return metrics.ResultErrorUnsupportedFam
 	case errors.Is(err, wireguard.ErrPeerNotFound):
 		return metrics.ResultErrorNotFound
-	case strings.Contains(err.Error(), "save peer store"):
-		// Persist failures wrap with this prefix in wireguard.errSavePeerStoreFmt.
-		// Substring match keeps this contract loose: a sentinel error would be
-		// stricter, but the prefix is specific enough that false positives are
-		// effectively impossible.
+	case errors.Is(err, wireguard.ErrInvalidAddressFamily):
+		return metrics.ResultErrorUnsupportedFam
+	case errors.Is(err, wireguard.ErrPeerStore):
 		return metrics.ResultErrorPersist
 	}
 	return metrics.ResultErrorInternal
@@ -342,11 +346,36 @@ func peerError(err error) (int, string, string) {
 	if errors.Is(err, wireguard.ErrPeerExpired) {
 		return http.StatusConflict, "peer has expired; pass a future expiresAt to renew it", "peer_expired"
 	}
+	if errors.Is(err, wireguard.ErrInvalidAddressFamily) {
+		return http.StatusBadRequest, "addressFamilies may only contain IPv4 and IPv6, each at most once", "invalid_address_family"
+	}
 	if errors.Is(err, wireguard.ErrUnsupportedAddressFamily) {
 		return http.StatusBadRequest, "requested address family is not supported by this node", "unsupported_address_family"
 	}
 
 	return http.StatusInternalServerError, "wireguard operation failed", "wireguard_error"
+}
+
+// decodeStrictJSON decodes exactly one JSON object into v. Unknown fields and
+// trailing data are errors: a misspelled field such as "expires_at" would
+// otherwise be dropped and, for expiresAt, issue a peer that never expires.
+func decodeStrictJSON(body io.Reader, v any) error {
+	if body == nil {
+		return errors.New("empty body")
+	}
+	dec := json.NewDecoder(body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			return err
+		}
+		return errors.New("unexpected data after the JSON object")
+	}
+	return nil
 }
 
 // writeError sends a JSON error. Internal details never reach the client:

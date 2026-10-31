@@ -132,3 +132,25 @@ func TestServerEmptyTokenRejectsAll(t *testing.T) {
 		}
 	}
 }
+
+// TestServerUnauthenticatedFloodDoesNotStarveScraper checks that auth runs
+// before the rate limit: requests without the token are rejected without
+// using up the budget of the real scraper.
+func TestServerUnauthenticatedFloodDoesNotStarveScraper(t *testing.T) {
+	m := New()
+	h := newTestHandler(t, m, testToken)
+	for range 50 {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, metricsPath, nil))
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("unauthenticated request: got %d, want 401", rec.Code)
+		}
+	}
+	req := httptest.NewRequest(http.MethodGet, metricsPath, nil)
+	req.Header.Set("Authorization", "Bearer "+testToken)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("scrape after an unauthenticated flood: got %d, want 200", rec.Code)
+	}
+}

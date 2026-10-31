@@ -23,9 +23,16 @@ const (
 	// every peer while the orchestrator still believes they exist.
 	DefaultPeerStoreFile = "/var/lib/wgkeeper/peers.db"
 
-	errMsgRequired        = "%s is required"
-	minAPIKeyLength       = 32
-	minMetricsTokenLength = 32
+	errMsgRequired = "%s is required"
+
+	// Defaults for settings that rarely change, so a minimal config is just
+	// auth.api_key and a subnet.
+	DefaultAPIPort         = 51821
+	DefaultInterface       = "wg0"
+	DefaultWireGuardPort   = 51820
+	maxInterfaceNameLength = 15 // IFNAMSIZ - 1
+	minAPIKeyLength        = 32
+	minMetricsTokenLength  = 32
 )
 
 type Config struct {
@@ -124,8 +131,11 @@ func loadConfigFile(path string) (Config, error) {
 		return Config{}, fmt.Errorf("read config: %w", err)
 	}
 	var fc fileConfig
-	if err := yaml.Unmarshal(raw, &fc); err != nil {
-		return Config{}, fmt.Errorf("parse config: %w", err)
+	// Unknown keys are errors: a typo in a key would otherwise start the node
+	// without the setting the operator thinks is on.
+	if err := yaml.UnmarshalWithOptions(raw, &fc, yaml.DisallowUnknownField()); err != nil {
+		// Without source snippets: they can include auth.api_key or metrics.token.
+		return Config{}, fmt.Errorf("parse config %s: %s", path, yaml.FormatError(err, false, false))
 	}
 	portValue, apiKey, err := parseServerAndAuth(fc)
 	if err != nil {
@@ -176,7 +186,7 @@ func parseMetrics(fc fileConfig) (port int, token string, err error) {
 	if len(token) < minMetricsTokenLength {
 		return 0, "", fmt.Errorf("metrics.token must be at least %d characters when metrics.port is set; do not reuse auth.api_key", minMetricsTokenLength)
 	}
-	if token == fc.Auth.APIKey {
+	if token == strings.TrimSpace(fc.Auth.APIKey) {
 		return 0, "", fmt.Errorf("metrics.token must differ from auth.api_key (use a separate secret for the scrape endpoint)")
 	}
 	return port, token, nil
@@ -199,7 +209,7 @@ func parseServerAndAuth(fc fileConfig) (portValue int, apiKey string, err error)
 	if err := rejectRemovedServerKeys(fc); err != nil {
 		return 0, "", err
 	}
-	portValue, err = parsePort("server.port", fc.Server.Port)
+	portValue, err = parseAPIPort(fc.Server.Port)
 	if err != nil {
 		return 0, "", err
 	}
@@ -241,11 +251,14 @@ func parseWireGuard(fc fileConfig) (wgSubnet, wgSubnet6, wgInterface, wgServerIP
 	if err := validateWireGuardSubnets(wgSubnet, wgSubnet6); err != nil {
 		return "", "", "", "", "", "", 0, "", err
 	}
-	wgInterface, err = requireString("wireguard.interface", fc.WireGuard.Interface)
+	wgInterface, err = parseInterfaceName("wireguard.interface", fc.WireGuard.Interface)
 	if err != nil {
 		return "", "", "", "", "", "", 0, "", err
 	}
 	wgListenPort = fc.WireGuard.ListenPort
+	if wgListenPort == 0 {
+		wgListenPort = DefaultWireGuardPort
+	}
 	if err := requirePort("wireguard.listen_port", wgListenPort); err != nil {
 		return "", "", "", "", "", "", 0, "", err
 	}
@@ -349,10 +362,26 @@ func IsSafeInterfaceName(name string) bool {
 	return validNetworkInterface.MatchString(name)
 }
 
-func parsePort(field, value string) (int, error) {
+// parseInterfaceName returns the WireGuard interface name, DefaultInterface
+// when unset. It names the wg-quick config file and is substituted into the
+// PostUp rules, so it must be a short, safe Linux interface name.
+func parseInterfaceName(field, value string) (string, error) {
+	name := strings.TrimSpace(value)
+	if name == "" {
+		return DefaultInterface, nil
+	}
+	if len(name) > maxInterfaceNameLength || !IsSafeInterfaceName(name) {
+		return "", fmt.Errorf("%s must be a Linux interface name of up to %d letters, digits, hyphens, underscores or dots", field, maxInterfaceNameLength)
+	}
+	return name, nil
+}
+
+// parseAPIPort parses server.port, DefaultAPIPort when unset.
+func parseAPIPort(value string) (int, error) {
+	const field = "server.port"
 	raw := strings.TrimSpace(value)
 	if raw == "" {
-		return 0, fmt.Errorf(errMsgRequired, field)
+		return DefaultAPIPort, nil
 	}
 	port, err := strconv.Atoi(raw)
 	if err != nil || port <= 0 || port > 65535 {

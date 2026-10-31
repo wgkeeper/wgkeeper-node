@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/wgkeeper/wgkeeper-node/internal/metrics"
 	"github.com/wgkeeper/wgkeeper-node/internal/wireguard"
 
 	"github.com/gin-gonic/gin"
@@ -243,6 +245,54 @@ func TestCreatePeerExpiredRotation(t *testing.T) {
 	rec := performRequest(t, router, http.MethodPost, pathPeers, body, testAPIKey)
 	assertStatus(t, rec, http.StatusConflict)
 	assertJSONErrorCode(t, rec.Body.Bytes(), "peer_expired")
+}
+
+func TestCreatePeerStrictJSON(t *testing.T) {
+	cases := map[string]string{
+		// A misspelled expiresAt must not silently create a permanent peer.
+		"unknown_field": `{"peerId":"550e8400-e29b-41d4-a716-446655440000","expires_at":"2030-01-01T00:00:00Z"}`,
+		"trailing_data": `{"peerId":"550e8400-e29b-41d4-a716-446655440000"} {"peerId":"x"}`,
+		"not_an_object": `[]`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			router := newTestRouter()
+			called := false
+			router.POST(pathPeers, apiKeyMiddleware(testAPIKey), createPeerHandler(mockWGService{
+				ensurePeerFunc: func(string, *time.Time, []string) (wireguard.PeerInfo, error) {
+					called = true
+					return wireguard.PeerInfo{}, nil
+				},
+			}, nil))
+			rec := performRequest(t, router, http.MethodPost, pathPeers, []byte(body), testAPIKey)
+			assertStatus(t, rec, http.StatusBadRequest)
+			assertJSONErrorCode(t, rec.Body.Bytes(), "invalid_json")
+			if called {
+				t.Error("EnsurePeer must not be called for a rejected body")
+			}
+		})
+	}
+}
+
+func TestCreatePeerInvalidAddressFamily(t *testing.T) {
+	router := newTestRouter()
+	router.POST(pathPeers, apiKeyMiddleware(testAPIKey), createPeerHandler(mockWGService{
+		ensurePeerFunc: func(string, *time.Time, []string) (wireguard.PeerInfo, error) {
+			return wireguard.PeerInfo{}, fmt.Errorf("%w: duplicate %q", wireguard.ErrInvalidAddressFamily, "IPv4")
+		},
+	}, nil))
+
+	body := []byte(`{"peerId":"550e8400-e29b-41d4-a716-446655440000","addressFamilies":["IPv4","IPv4"]}`)
+	rec := performRequest(t, router, http.MethodPost, pathPeers, body, testAPIKey)
+	assertStatus(t, rec, http.StatusBadRequest)
+	assertJSONErrorCode(t, rec.Body.Bytes(), "invalid_address_family")
+}
+
+func TestResultLabelPersistSentinel(t *testing.T) {
+	err := fmt.Errorf("%w: %w", wireguard.ErrPeerStore, errors.New("disk full"))
+	if got := resultLabel(err); got != metrics.ResultErrorPersist {
+		t.Errorf("resultLabel = %q, want %q", got, metrics.ResultErrorPersist)
+	}
 }
 
 func TestCreatePeerServerInfoError(t *testing.T) {

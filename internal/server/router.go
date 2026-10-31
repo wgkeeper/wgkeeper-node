@@ -2,8 +2,10 @@ package server
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 
 	"github.com/wgkeeper/wgkeeper-node/internal/metrics"
 	"github.com/wgkeeper/wgkeeper-node/internal/wireguard"
@@ -40,7 +42,6 @@ func NewRouter(apiKey string, wgService *wireguard.WireGuardService, m *metrics.
 	}
 	router.Use(requestIDMiddleware())
 	router.Use(securityHeadersMiddleware())
-	router.Use(bodyLimitMiddleware(MaxRequestBodySize))
 	// Metrics middleware records request count + duration. Nil-safe: when
 	// metrics are disabled, GinMiddleware returns a no-op so we register it
 	// unconditionally.
@@ -66,7 +67,7 @@ func NewRouter(apiKey string, wgService *wireguard.WireGuardService, m *metrics.
 			"request_id", requestID,
 		)
 		return ""
-	}), gin.Recovery())
+	}), recoveryMiddleware())
 	registerRoutes(router, apiKey, wgService, m)
 	return router
 }
@@ -78,9 +79,27 @@ func registerRoutes(router *gin.Engine, apiKey string, wgService *wireguard.Wire
 	router.GET("/readyz", readinessHandler(wgService))
 	router.GET("/stats", apiKeyMiddleware(apiKey), statsHandler(wgService))
 
-	peers := router.Group("/peers", apiKeyMiddleware(apiKey))
+	// The body limit runs after auth, so unauthenticated requests never get
+	// their body read.
+	peers := router.Group("/peers", apiKeyMiddleware(apiKey), bodyLimitMiddleware(MaxRequestBodySize))
 	peers.GET("", listPeersHandler(wgService))
 	peers.GET("/:peerId", getPeerHandler(wgService))
 	peers.POST("", createPeerHandler(wgService, m))
 	peers.DELETE("/:peerId", deletePeerHandler(wgService, m))
+}
+
+// recoveryMiddleware turns a handler panic into a 500 and logs it through
+// slog with the request ID and stack. gin's own Recovery dumps the request
+// headers in debug mode, which would put X-API-Key into the log.
+func recoveryMiddleware() gin.HandlerFunc {
+	return gin.CustomRecoveryWithWriter(io.Discard, func(c *gin.Context, recovered any) {
+		slog.Error("panic recovered",
+			"request_id", GetRequestID(c),
+			"method", c.Request.Method,
+			"path", c.FullPath(),
+			"panic", recovered,
+			"stack", string(debug.Stack()),
+		)
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "internal error", "code": "internal_error"})
+	})
 }
