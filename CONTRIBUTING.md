@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping with WGKeeper Node. Bug reports, fixes and docs improvements are welcome. For a new feature or a change in API behavior, please open an issue first so we can agree on the approach before you write code.
+Thanks for helping with wgkeeper node. Bug reports, fixes and docs improvements are welcome. For a new feature or a change in API behavior, please open an issue first so we can agree on the approach before you write code.
 
 Security issues go through [SECURITY.md](SECURITY.md), not public issues.
 
