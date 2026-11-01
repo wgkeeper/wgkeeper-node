@@ -1,10 +1,8 @@
 <p align="center">
-  <img width="900" alt="WGKeeper logo" src="https://github.com/user-attachments/assets/0e8e4b9b-eec4-4b95-b48b-16455b79f732" />
+  <img alt="wgkeeper node" src="https://raw.githubusercontent.com/wgkeeper/wgkeeper/main/brand/wgkeeper-node.svg" height="64">
 </p>
 
-<h1 align="center">WGKeeper Node</h1>
-
-<p align="center"><strong>A WireGuard node you manage over a REST API.</strong></p>
+<p align="center">A WireGuard node you manage over a REST API.</p>
 
 <div align="center">
 
@@ -19,7 +17,7 @@
 
 ---
 
-WGKeeper Node runs one WireGuard interface on a Linux host and exposes an HTTP API to create, rotate, list and delete its peers. It has no UI and no user accounts: a single orchestrator holds the API key and manages many nodes. That orchestrator can be your own service or [WGKeeper Console](https://github.com/wgkeeper/wgkeeper-console).
+wgkeeper node runs one WireGuard interface on a Linux host and exposes an HTTP API to create, rotate, list and delete its peers. It has no UI and no user accounts: a single orchestrator holds the API key and manages many nodes. That orchestrator can be your own service or [wgkeeper console](https://github.com/wgkeeper/wgkeeper-console).
 
 - Peers are created with an expiry or as permanent; expired peers are removed by the node itself.
 - Keys can be rotated without changing the peer's IP address.
@@ -36,7 +34,7 @@ flowchart LR
   Orchestrator[Orchestrator] -->|REST API<br/>TCP 51821| API
   Clients[VPN clients] -->|WireGuard<br/>UDP 51820| WG
 
-  subgraph Node[WGKeeper Node]
+  subgraph Node[wgkeeper node]
     API[REST API]
     WG[WireGuard interface]
   end

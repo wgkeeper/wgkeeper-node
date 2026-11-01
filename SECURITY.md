@@ -1,6 +1,6 @@
 # Security policy
 
-WGKeeper Node manages a WireGuard interface and its peers over an HTTP API, so it holds private keys, preshared keys and API credentials, and runs with `NET_ADMIN`. We treat security issues as the highest priority.
+wgkeeper node manages a WireGuard interface and its peers over an HTTP API, so it holds private keys, preshared keys and API credentials, and runs with `NET_ADMIN`. We treat security issues as the highest priority.
 
 Examples of what we consider a vulnerability:
 

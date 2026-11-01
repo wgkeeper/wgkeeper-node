@@ -1,4 +1,4 @@
-# WGKeeper Node documentation
+# wgkeeper node documentation
 
 - [Configuration](configuration.md): requirements, `config.yaml` keys, environment variables.
 - [Deployment](deployment.md): install script and updates, Docker Compose, running behind a reverse proxy (Caddy and nginx examples), building from source.

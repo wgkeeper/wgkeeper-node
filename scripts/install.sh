@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Installs or upgrades WGKeeper Node with Docker Compose on a Linux host.
+# Installs or upgrades wgkeeper node with Docker Compose on a Linux host.
 #
 #   curl -fsSL https://raw.githubusercontent.com/wgkeeper/wgkeeper-node/main/scripts/install.sh | sudo bash
 #   curl -fsSL https://raw.githubusercontent.com/wgkeeper/wgkeeper-node/main/scripts/install.sh | sudo bash -s -- --domain node1.example.com
@@ -53,7 +53,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
-[[ "$(uname -s)" == "Linux" ]] || die "WGKeeper Node runs on Linux only"
+[[ "$(uname -s)" == "Linux" ]] || die "wgkeeper node runs on Linux only"
 [[ "$(id -u)" -eq 0 ]] || die "run as root (sudo bash ...)"
 command -v curl >/dev/null || die "curl is required"
 if [[ -n "$DOMAIN" && ! "$DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]]; then
@@ -80,7 +80,7 @@ if [[ -z "$VERSION" ]]; then
 	[[ -n "$VERSION" ]] || die "could not find the latest release; pass --version"
 fi
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || die "invalid version: $VERSION"
-log "Installing WGKeeper Node $VERSION into $DIR"
+log "Installing wgkeeper node $VERSION into $DIR"
 
 # --- Files ------------------------------------------------------------------
 # fetch PATH copies PATH from the release (or WGKEEPER_FILES) into $DIR.
@@ -109,7 +109,7 @@ else
 	log "Writing config.yaml with a new API key"
 	umask 077
 	cat >config.yaml <<EOF
-# WGKeeper Node config. All keys: https://github.com/$REPO/blob/v$VERSION/docs/configuration.md
+# wgkeeper node config. All keys: https://github.com/$REPO/blob/v$VERSION/docs/configuration.md
 auth:
   api_key: "$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 wireguard:
@@ -167,12 +167,12 @@ fi
 
 cat <<EOF
 
-WGKeeper Node $VERSION is running in $DIR.
+wgkeeper node $VERSION is running in $DIR.
 
   API address:  $address
   API key:      $api_key
   WireGuard:    51820/udp
 
-Add the node to your orchestrator or WGKeeper Console with this address and key.
+Add the node to your orchestrator or wgkeeper console with this address and key.
 Manage it with: cd $DIR && docker compose ps | logs | down
 EOF
