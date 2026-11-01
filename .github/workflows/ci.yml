@@ -47,6 +47,16 @@ jobs:
       - name: Run Go tests
         run: go test -race -coverprofile=coverage.txt ./...
 
+      # go test above already runs the seed corpus; this explores past it.
+      # -fuzz takes one target at a time, so loop over each package's targets.
+      - name: Run fuzz tests
+        run: |
+          for pkg in $(go list ./...); do
+            for target in $(go test -list '^Fuzz' "$pkg" | grep '^Fuzz'); do
+              go test -run '^$' -fuzz "^${target}\$" -fuzztime=15s "$pkg"
+            done
+          done
+
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
